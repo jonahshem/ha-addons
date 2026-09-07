@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.2.3"
+version: "0.3.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -43,6 +43,11 @@ options:
   realm: ravabridge
   # Print every SIP message. Loud; the thing to turn on when a door will not ring.
   log_sip: false
+  # Join the panels' Rava paging multicast group and record what a Crestron Home page looks like
+  # on the wire (GET /pages). Observation only for now; the road to pages on the NAX speakers.
+  page_listen: true
+  page_group: "227.1.1.1"
+  page_port: 1234
   # Optional: register into UniFi Talk as a third-party device so phones can ring the panels (audio).
   talk:
     host: ""
@@ -92,6 +97,9 @@ schema:
   ring_seconds: int
   realm: str
   log_sip: bool
+  page_listen: bool?
+  page_group: str?
+  page_port: int?
   talk:
     host: str?
     port: int?

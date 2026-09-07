@@ -119,6 +119,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             self._json({"error": "unauthorized"}, 401)
             return
+        if path == "/pages":
+            pl = getattr(BRIDGE, "pages", None)
+            self._json(pl.public() if pl else {"error": "page listening is off"})
+            return
         if path == "/status":
             st = BRIDGE.status()
             st["discovery"] = {"at": LAST_DISCOVERY["at"],

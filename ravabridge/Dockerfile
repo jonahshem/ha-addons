@@ -9,6 +9,7 @@ COPY main.py /main.py
 COPY bridge.py /bridge.py
 COPY api.py /api.py
 COPY discover.py /discover.py
+COPY pages.py /pages.py
 COPY sip.py /sip.py
 COPY rtp.py /rtp.py
 RUN chmod a+x /run.sh
