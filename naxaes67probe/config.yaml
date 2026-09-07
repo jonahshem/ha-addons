@@ -1,0 +1,12 @@
+name: NAX AES67 Probe
+version: "0.1.0"
+slug: naxaes67probe
+description: Read-only PTP/multicast feasibility probe for AES67 into the DM NAX
+arch: [aarch64]
+init: false
+host_network: true
+host_pid: true
+privileged: [NET_ADMIN, SYS_TIME, SYS_NICE, NET_RAW]
+map: [share:rw]
+boot: manual
+startup: application

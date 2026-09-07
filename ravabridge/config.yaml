@@ -1,0 +1,111 @@
+name: Rava Bridge
+version: "0.2.3"
+slug: ravabridge
+description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
+arch: [aarch64, amd64]
+init: false
+# SIP and RTP have to arrive on the house LAN as themselves, and the video
+# leaves as multicast: no port mapping can do that, so the container shares
+# the host's network.
+host_network: true
+map: [share:rw]
+# Discovery writes what it finds back into these options through the Supervisor,
+# so a found panel or door shows up on this page like one typed by hand.
+hassio_api: true
+boot: auto
+startup: application
+ingress: true
+ingress_port: 8098
+panel_icon: mdi:doorbell-video
+options:
+  # Find the panels (SIP scan of this subnet, then SIPINFO over SSH with the panel password) and the
+  # doors (UniFi Access readers that speak third-party SIP, once `access` is filled in) at startup,
+  # every six hours, and on POST /discover. Adds; never removes what a person entered.
+  autodetect: true
+  panel_user: admin
+  panel_password: "2129918115"
+  # The touch panels, as Crestron Home left them: peer-to-peer Rava, never registered anywhere.
+  # `ext` is the panel's SIP local extension (console: SIPINFO -> "SIP local ext"); blank is fine.
+  panels: []
+  # Who may ring the house. A UniFi Access intercom registers here with this user/password;
+  # `ring` names panels or groups, or "all". `door_id` is the Access door /unlock opens.
+  doors: []
+  # Optional: what a dialed number rings. Otherwise the door's `ring`.
+  recipients: []
+  #  - number: "0005"
+  #    ring: ["1st floor"]
+  # One H.264 stream for every panel in the group. The panels' own paging multicast is 227.1.1.1:1234.
+  mcast: "227.1.1.2"
+  mcast_port: 40002
+  mcast_ttl: 16
+  ring_seconds: 60
+  # Registrar realm the door sees in the digest challenge.
+  realm: ravabridge
+  # Print every SIP message. Loud; the thing to turn on when a door will not ring.
+  log_sip: false
+  # Optional: register into UniFi Talk as a third-party device so phones can ring the panels (audio).
+  talk:
+    host: ""
+    port: 5060
+    user: ""
+    password: ""
+    ring: ["all"]
+  # Optional: POST /unlock opens this UniFi Access door.
+  access:
+    host: ""
+    token: ""
+    door_id: ""
+  # The API on the LAN is locked by this bearer; ingress needs no token.
+  api_token: "2129918115"
+  api_port: 8098
+  # Leave blank to pick the interface that reaches the first panel.
+  bind_ip: ""
+  sip_port: 5060
+schema:
+  autodetect: bool
+  panel_user: str
+  panel_password: password
+  subnet: str?
+  panels:
+    - name: str
+      host: str
+      ext: str?
+      port: int?
+      hostname: str?
+      groups:
+        - str
+  doors:
+    - name: str
+      user: str
+      password: password
+      host: str?
+      door_id: str?
+      ring:
+        - str
+  recipients:
+    - number: str
+      ring:
+        - str
+  mcast: str
+  mcast_port: int
+  mcast_ttl: int
+  ring_seconds: int
+  realm: str
+  log_sip: bool
+  talk:
+    host: str?
+    port: int?
+    user: str?
+    password: password?
+    name: str?
+    expires: int?
+    ring:
+      - str
+  access:
+    host: str?
+    token: password?
+    door_id: str?
+  api_token: str
+  api_port: int
+  bind_ip: str?
+  sip_port: int

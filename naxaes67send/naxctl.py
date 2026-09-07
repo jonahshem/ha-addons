@@ -1,0 +1,478 @@
+"""Switching a DM NAX zone to the AES67 stream, and back.
+
+Every rule in here was measured against the DM-NAX-8ZSA at 14 Malke on
+2-3 Sep 2026. None of it is inferred from documentation, and two of the rules
+look like bugs on the way in:
+
+  * 🔴 **Login needs an `Origin` header.** Without one, every source IP gets a
+    403 that looks exactly like an account lockout. It is not one, and
+    rebooting the amplifier to clear it - which is the obvious thing to do -
+    achieves nothing.
+
+  * 🔴 **NaxRx writes are accepted and ignored over REST.** They return 200,
+    they read back wrong, and they only take over the WebSocket. The device's
+    own configuration app drives everything over `wss://<ip>/websockify`.
+
+  * 🔴 **The route clears itself on the first write.** Setting
+    `Routes/ZoneN/AudioSource` makes the device transiently blank it, which
+    happens to its own web UI too. Write it again about 1.5 s later and it
+    sticks - two writes in practice. Reading that clear as a rejection is the
+    trap that cost most of the session this came from.
+
+Standard library plus `websocket-client`, which the add-on image installs.
+"""
+import json
+import ssl
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import http.cookiejar
+
+import websocket
+
+SOURCE = "Aes67"       # what the amplifier calls our announcement input
+SETTLE = 1.5           # how long the device takes to decide a route stuck
+ATTEMPTS = 6           # two is normal; six is for a device having a bad day
+
+
+def _zone_order(name):
+    """Zone10 after Zone9, not between Zone1 and Zone2."""
+    tail = str(name).replace("Zone", "").strip()
+    return (0, int(tail)) if tail.isdigit() else (1, str(name))
+
+
+class NaxError(RuntimeError):
+    pass
+
+
+class Nax:
+    """One amplifier: log in, hold a WebSocket, route zones."""
+
+    def __init__(self, host, user="admin", password="", log=print):
+        self.host = host
+        self.user = user
+        self.password = password
+        self.log = log
+        self.jar = http.cookiejar.CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar),
+            urllib.request.HTTPSHandler(context=self._lax()))
+        self.xsrf = ""
+        self.ws = None
+        self.routes = {}
+        self._stop = False
+
+    @staticmethod
+    def _lax():
+        # A Crestron device signs its web UI with its own certificate. There
+        # is no CA to check it against and pinning it would break on every
+        # firmware update, so this trusts the address instead - which is the
+        # same trust the installer's browser extends when it clicks through.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _url(self, path):
+        return f"https://{self.host}{path}"
+
+    def _headers(self):
+        return {
+            # Both of these, on every request. See the Origin note above.
+            "Origin": f"https://{self.host}",
+            "Referer": self._url("/userlogin.html"),
+            "User-Agent": "HomeUI-NaxAnnounce/1.0",
+        }
+
+    # -- getting in -------------------------------------------------------
+    def login(self):
+        body = urllib.parse.urlencode(
+            {"login": self.user, "passwd": self.password}).encode()
+        req = urllib.request.Request(self._url("/userlogin.html"), data=body,
+                                     headers=self._headers())
+        try:
+            with self._opener.open(req, timeout=20) as r:
+                r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                raise NaxError(
+                    "403 from the amplifier. If the password is right this is "
+                    "almost always a missing Origin header rather than a "
+                    "locked account - do not reboot it.") from e
+            raise NaxError(f"login failed: {e.code}") from e
+        except urllib.error.URLError as e:
+            raise NaxError(f"cannot reach {self.host}: {e.reason}") from e
+
+        for c in self.jar:
+            if c.name == "CREST-XSRF-TOKEN":
+                self.xsrf = c.value
+        if not any(c.name.startswith("iv") or "CREST" in c.name for c in self.jar):
+            raise NaxError("logged in but the device set no session cookie")
+        return True
+
+    def _cookie_header(self):
+        return "; ".join(f"{c.name}={c.value}" for c in self.jar)
+
+    # -- REST, for reading -------------------------------------------------
+    def get(self, path):
+        req = urllib.request.Request(self._url(f"/Device/{path}/"),
+                                     headers=self._headers())
+        with self._opener.open(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8", "replace")).get("Device", {})
+
+    @staticmethod
+    def _label(obj):
+        """Whatever this amplifier calls a zone, if it calls it anything.
+
+        Written by looking rather than by knowing: the firmware here was never
+        dumped field by field, so this takes the obvious keys first and then
+        anything ending in `Name` that holds a non-empty string. A zone the
+        device has not named comes back empty and gets numbered instead - the
+        house renames them in Settings either way, and guessing a name would
+        be worse than admitting there isn't one.
+        """
+        obj = obj or {}
+        for key in ("Name", "ZoneName", "UserName", "Label", "FriendlyName"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for key, v in obj.items():
+            if key.endswith("Name") and isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    def zones(self):
+        """Every zone: what it is called, its source, whether audio is there."""
+        out = {}
+        try:
+            routes = self.get("AvMatrixRouting")["AvMatrixRouting"]["Routes"]
+        except Exception:
+            routes = {}
+        try:
+            zs = self.get("ZoneOutputs")["ZoneOutputs"]["Zones"]
+        except Exception:
+            zs = {}
+        for name in sorted(set(routes) | set(zs), key=_zone_order):
+            out[name] = {
+                "name": self._label(zs.get(name)) or self._label(routes.get(name)),
+                "source": (routes.get(name) or {}).get("AudioSource", ""),
+                # Decays: stays true for about six seconds after a source is
+                # removed, so it proves presence and never absence.
+                "signal": (zs.get(name) or {}).get("IsSignalDetected"),
+            }
+        return out
+
+    # -- the receive slot a zone listens on --------------------------------
+    def rx_streams(self):
+        try:
+            return self.get("NaxAudio")["NaxAudio"]["NaxRx"]["NaxRxStreams"] or {}
+        except Exception:
+            return {}
+
+    def ensure_rx(self, zone, session_name, address):
+        """Point ZoneN's receive slot at our stream, if it is ours to point.
+
+        `Stream0N` belongs to `ZoneN` - Stream04 is Deck. A slot that is empty,
+        or that already names our session, is ours to set.
+
+        🔴 A slot carrying **somebody else's** session is left alone and the
+        zone is refused. These are client houses, and a NAX receive slot can
+        be a real distribution path between amplifiers; quietly stealing one
+        would take a room off the air somewhere else in the building and the
+        symptom would appear nowhere near this code.
+
+        Returns True if it wrote, False if it was already right, and raises if
+        the slot belongs to something else.
+        """
+        try:
+            n = int(str(zone).replace("Zone", "").strip())
+        except ValueError as e:
+            raise NaxError(f"{zone} is not a zone name") from e
+        slot = f"Stream{n:02d}"
+        cur = self.rx_streams().get(slot) or {}
+        mine = (cur.get("SessionNameRequested") or cur.get("SessionName") or "").strip()
+        if mine == session_name:
+            return False
+        if mine:
+            raise NaxError(
+                f"{zone}'s receive slot is already carrying {mine!r} - "
+                f"leaving it alone rather than taking it over")
+        self.subscribe(slot, session_name, address)
+        time.sleep(SETTLE)
+        return True
+
+    # -- the WebSocket, for writing ---------------------------------------
+    def open(self):
+        self.ws = websocket.create_connection(
+            f"wss://{self.host}/websockify",
+            sslopt={"cert_reqs": ssl.CERT_NONE},
+            header=[f"Cookie: {self._cookie_header()}",
+                    f"Referer: https://{self.host}/"],
+            origin=f"https://{self.host}", timeout=20)
+        threading.Thread(target=self._listen, daemon=True).start()
+        return self
+
+    def _listen(self):
+        self.ws.settimeout(0.6)
+        while not self._stop:
+            try:
+                raw = self.ws.recv()
+                text = (raw if isinstance(raw, str)
+                        else raw.decode("utf-8", "replace")).strip()
+                if not text:
+                    continue
+                routes = (json.loads(text).get("Device", {})
+                          .get("AvMatrixRouting", {}).get("Routes", {}))
+                for zone, v in routes.items():
+                    if not isinstance(v, dict):
+                        continue
+                    if not v:
+                        # An empty object is the device clearing the route,
+                        # which is a step in the dance rather than a failure.
+                        self.routes[zone] = ""
+                    elif "AudioSource" in v:
+                        self.routes[zone] = v["AudioSource"] or ""
+                    # 🔴 Anything else is an update *about* the zone - volume,
+                    # signal, mute - that says nothing about its source, and
+                    # must not be read as one.
+                    #
+                    # This used to be `v.get("AudioSource", "")`, which turned
+                    # every one of those into "the route is empty". Clearing a
+                    # zone was then confirmed by the next unrelated push about
+                    # it, whether or not the clear had landed. Five rooms at
+                    # 14 Malke sat on a silent input for a day because of this
+                    # one default, and the log said "restored" for every one
+                    # of them.
+            except Exception:
+                pass
+
+    def _send(self, obj):
+        self.ws.send(json.dumps(obj))
+
+    def route(self, zone, source):
+        self._send({"Device": {"AvMatrixRouting": {"Routes": {zone: {"AudioSource": source}}}}})
+
+    def route_sticky(self, zone, source, attempts=ATTEMPTS, settle=SETTLE):
+        """Write one route until it holds. Returns the writes taken, or None."""
+        return self.route_all({zone: source}, attempts, settle).get(zone)
+
+    def _holding(self, zone, source):
+        """Is this zone on this source? A zone we have never heard about
+        counts as empty, which is the only sane reading of silence when the
+        thing being asked is whether it has been cleared."""
+        return (self.routes.get(zone) or "") == (source or "")
+
+    def route_all(self, wanted, attempts=ATTEMPTS, settle=SETTLE):
+        """Write a set of routes until they hold. {zone: source} in,
+        {zone: writes or None} out.
+
+        🔴 **One zone at a time.** This was briefly batched - write every
+        zone, then let the two 1.5 s settles overlap - which would have taken
+        a whole-house page from fifty seconds of switching down to eight. The
+        amplifier does not allow it: given several route writes at once it
+        acts on one and silently ignores the rest, so a repair run cleared
+        exactly one room per attempt and reported all of them cleared.
+
+        That was an assumption about the device, not a measurement of it, and
+        it is the second time this file has been wrong that way. The original
+        session's rule stands: write, wait, confirm, and do it per zone.
+
+        Clearing a zone is confirmed like anything else. It used to be written
+        once and not waited on, and that is how five rooms at 14 Malke ended
+        up stuck on the announcement input with the log saying "restored" for
+        every one of them. An empty route is a route.
+        """
+        out = {}
+        for zone, source in wanted.items():
+            out[zone] = None
+            for i in range(attempts):
+                self.route(zone, source)
+                time.sleep(settle)
+                # Held once. Not yet believed - this is exactly the moment
+                # the device is about to clear it.
+                if not self._holding(zone, source):
+                    continue
+                time.sleep(settle)
+                if self._holding(zone, source):
+                    out[zone] = i + 1
+                    break
+        return out
+
+    def subscribe(self, stream, session_name, address):
+        """Point a zone's Rx slot at our announced stream.
+
+        Over the WebSocket only - the REST equivalent returns 200 and does
+        nothing at all.
+        """
+        self._send({"Device": {"NaxAudio": {"NaxRx": {"NaxRxStreams": {
+            stream: {"SessionNameRequested": session_name,
+                     "NetworkAddressRequested": address,
+                     "StartRequested": True}}}}}})
+
+    def close(self):
+        self._stop = True
+        time.sleep(0.8)
+        try:
+            if self.ws:
+                self.ws.close()
+        except Exception:
+            pass
+
+
+def announce(host, user, password, zones, play, *, source=SOURCE,
+             restore=None, log=print, session_name="", address=""):
+    """One amplifier. Kept as the simple case; `announce_many` does the rest."""
+    return announce_many({host: {"user": user, "password": password}},
+                         {host: zones}, play, source=source, log=log,
+                         session_name=session_name, address=address,
+                         restore={host: restore} if restore else None)
+
+
+def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
+                  log=print, session_name="", address=""):
+    """Switch zones on one or more amplifiers, play once, put them all back.
+
+    `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
+
+    One `play()` for all of them, because there is only one stream: AES67 is
+    multicast, so every amplifier on the LAN hears the same audio at the same
+    moment. Paging four rooms on two amplifiers is four routes and one voice,
+    not two announcements that would arrive a second apart and echo.
+
+    Restoring happens in a `finally`, because a zone left on a silent AES67
+    input is a room whose music never comes back - and that is a worse failure
+    than the announcement not playing at all. Every amplifier is restored even
+    if an earlier one threw on the way in.
+    """
+    conns = {}
+    before = {}          # (host, zone) -> the source it had
+    refused = []
+    try:
+        for host, zones in targets.items():
+            cfg = amps.get(host) or {}
+            nax = Nax(host, cfg.get("user") or "admin", cfg.get("password") or "",
+                      log=log)
+            nax.login()
+            nax.open()
+            conns[host] = nax
+            # Read every zone once, not once per zone. Each read is two HTTPS
+            # round trips to the amplifier, and paging the whole house would
+            # otherwise spend a dozen of them standing there before anybody
+            # heard anything.
+            was_all = nax.zones()
+            taking = []
+            for zone in zones:
+                if session_name:
+                    # A zone whose receive slot belongs to something else is
+                    # refused rather than taken over - see `ensure_rx`. The
+                    # page still goes ahead everywhere else, because one
+                    # awkward room should not silence the whole house.
+                    try:
+                        if nax.ensure_rx(zone, session_name, address):
+                            log(f"[nax] {host} {zone}: receive slot pointed at "
+                                f"{session_name!r}")
+                    except NaxError as e:
+                        log(f"[nax] {host} {zone}: {e}")
+                        refused.append(f"{host}:{zone}")
+                        continue
+                was = ((restore or {}).get(host) or {}).get(zone)
+                if was is None:
+                    was = was_all.get(zone, {}).get("source", "")
+                # 🔴 Never restore a zone to our own announcement input.
+                #
+                # If a zone is already on `Aes67` when a page starts, it is
+                # not because the house was listening to us - it is because an
+                # earlier page failed to put it back. Recording that as "what
+                # it was playing" makes the fault permanent: every page from
+                # then on faithfully restores the room to a silent input, and
+                # the log says "restored" each time. Five rooms at 14 Malke
+                # were stuck this way, cemented by every announcement after
+                # the first.
+                if was == source:
+                    log(f"[nax] {host} {zone}: was already on {source} - an "
+                        f"earlier announcement did not put it back; clearing "
+                        f"it instead of restoring it")
+                    was = ""
+                before[(host, zone)] = was
+                taking.append(zone)
+            # All of this amplifier's zones together - see `route_all`.
+            for zone, n in nax.route_all({z: source for z in taking}).items():
+                if n is None:
+                    log(f"[nax] {host} {zone}: {source} would not bind")
+                    refused.append(f"{host}:{zone}")
+                else:
+                    log(f"[nax] {host} {zone}: {source} bound after {n} "
+                        f"write(s), was {before[(host, zone)]!r}")
+        if len(before) > len(refused) or not refused:
+            play()
+    finally:
+        # Per amplifier and all at once, for the same reason as above - and
+        # this half matters more. Every second here is a second somebody's
+        # music is still off.
+        back = {}
+        for (host, zone), was in before.items():
+            back.setdefault(host, {})[zone] = was
+        for host, wanted in back.items():
+            nax = conns.get(host)
+            if not nax:
+                continue
+            try:
+                for zone, n in nax.route_all(wanted).items():
+                    if n is None:
+                        # The failure worth shouting about: a room left on a
+                        # silent input is a room whose music never comes back.
+                        log(f"[nax] {host} {zone}: COULD NOT RESTORE to "
+                            f"{wanted[zone]!r}")
+                    else:
+                        log(f"[nax] {host} {zone}: restored to {wanted[zone]!r}")
+            except Exception as e:
+                log(f"[nax] {host}: COULD NOT RESTORE ({e})")
+        for nax in conns.values():
+            try:
+                nax.close()
+            except Exception:
+                pass
+    return {"restored": {f"{h}:{z}": w for (h, z), w in before.items()},
+            "refused": refused}
+
+
+def stray(amps, *, source=SOURCE, log=print):
+    """Zones sitting on the announcement input that nobody is announcing into.
+
+    They should not exist: a page puts every zone back in a `finally`. When
+    they do exist it means a restore did not take, and the room has been
+    silent ever since - so this is worth being able to ask about, and worth
+    being able to undo without making an announcement to find out.
+    """
+    found = {}
+    for host, cfg in amps.items():
+        nax = Nax(host, cfg.get("user") or "admin", cfg.get("password") or "", log=log)
+        nax.login()
+        for zone, info in nax.zones().items():
+            if info.get("source") == source:
+                found.setdefault(host, []).append(zone)
+    return found
+
+
+def unstick(amps, targets, *, log=print):
+    """Clear the zones `stray` found, and confirm they went.
+
+    Only ever writes an empty route, and only to a zone that is on our own
+    input. It cannot take a room away from anything the house is playing.
+    """
+    out = {}
+    for host, zones in targets.items():
+        cfg = amps.get(host) or {}
+        nax = Nax(host, cfg.get("user") or "admin", cfg.get("password") or "", log=log)
+        nax.login()
+        nax.open()
+        try:
+            for zone, n in nax.route_all({z: "" for z in zones}).items():
+                out[f"{host}:{zone}"] = n is not None
+                log(f"[nax] {host} {zone}: "
+                    + ("cleared" if n is not None else "WOULD NOT CLEAR"))
+        finally:
+            nax.close()
+    return out
