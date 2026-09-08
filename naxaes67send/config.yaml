@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.3.5"
+version: "0.3.7"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64]
@@ -29,6 +29,11 @@ options:
   # already uses for device logins, so a fresh install works without a lookup -
   # change it per site if that PIN is not yours.
   api_token: "2129918115"
+  # Silence padded around a clip, in seconds. Raise these if an announcement is
+  # clipped at the start (the zone fading in) or the end (buffers still draining
+  # when the route is put back). Tuned by ear, per house.
+  lead_seconds: 1.5
+  tail_seconds: 3.0
   api_port: 8099
 schema:
   iface: str
@@ -46,4 +51,6 @@ schema:
   nax_user: str?
   nax_password: password?
   api_token: str
+  lead_seconds: float?
+  tail_seconds: float?
   api_port: int

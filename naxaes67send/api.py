@@ -56,6 +56,30 @@ MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
 MAX_BODY = 8192                    # for the JSON endpoints, not the audio one
 
+# Silence padded around every clip, both measured by ear at 14 Malke rather than
+# derived - the buffers involved are not all ours to inspect.
+#
+# LEAD covers the zone FADING IN on its new source: switch and speak immediately
+# and the first quarter second is inside the ramp. 0.6 was still clipping.
+#
+# TAIL covers the whole chain still holding audio when the last buffer is pushed -
+# appsrc, the sink, the network, and the NAX's own AES67 receive buffer, which is
+# the one we cannot see. Measured behaviour says that adds up to about two seconds,
+# so 1.5 was under it and the last half second was being cut by the restore.
+#
+# Both are overridable, because the right numbers are a property of the house's
+# amplifier and network rather than of this code.
+def _secs(name, default):
+    """An unset add-on option arrives as an empty string, not as absent."""
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return float(default)
+
+
+LEAD_SECONDS = _secs("LEAD_SECONDS", 1.5)
+TAIL_SECONDS = _secs("TAIL_SECONDS", 3.0)
+
 
 def log(msg):
     print(msg, flush=True)
@@ -157,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
                 "playing": sender.is_playing(),
                 "session": SESSION,
                 "multicast": MCAST,
+                # Surfaced so the padding can be tuned by ear without guessing
+                # whether the option actually reached the process.
+                "lead_seconds": LEAD_SECONDS,
+                "tail_seconds": TAIL_SECONDS,
                 "amps": sorted(amps),
                 # The single most useful thing to know when a page is silent:
                 # the sender must be running for the route to bind at all.
@@ -366,11 +394,23 @@ class Handler(BaseHTTPRequestHandler):
             # the amplifier settling on the new source. Speaking into a zone
             # that has not finished switching loses the first syllable, which
             # is usually somebody's name.
-            time.sleep(0.6)
+            time.sleep(LEAD_SECONDS)
             sender.play(pcm)
-            while sender.is_playing():
-                time.sleep(0.1)
-            time.sleep(0.4)
+
+            # 🔴 Do NOT wait on is_playing() alone. It goes false when the last
+            # buffer has been PUSHED, not when it has been heard - appsrc buffers
+            # ahead of the sink, so the tail of the clip is still in flight at
+            # that moment. And `play()` only enqueues, so the flag may not even
+            # be set yet the first time this looks, a race that can end the wait
+            # before a single note has left the box.
+            #
+            # The clip's own length is the one number here that is not a guess.
+            # Wait that out, then a tail for whatever is still buffered. Getting
+            # this wrong does not fail loudly: it silently clips the last word
+            # off every announcement, which is how it shipped.
+            deadline = time.time() + seconds + TAIL_SECONDS
+            while time.time() < deadline or sender.is_playing():
+                time.sleep(0.05)
 
         try:
             out = naxctl.announce_many(amps, targets, play, log=log,

@@ -48,5 +48,9 @@ if __name__ == "__main__":
         import pages
         b.pages = pages.PageListener(b, cfg.get("page_group") or "227.1.1.1", cfg.get("page_port") or 1234, log)
         b.pages.start()
+    import crpc
+    b.crpc = crpc.CrpcManager(cfg, log)
+    if b.crpc.enabled:
+        b.crpc.start()
     while True:
         time.sleep(3600)

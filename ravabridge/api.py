@@ -129,6 +129,8 @@ class Handler(BaseHTTPRequestHandler):
                                "readerSetup": (LAST_DISCOVERY["report"] or {}).get("readerSetup"),
                                "error": (LAST_DISCOVERY["report"] or {}).get("error"),
                                "supervisor": dict(discover.SUPERVISOR_STATE)}
+            crpc_mgr = getattr(BRIDGE, "crpc", None)
+            st["crpc"] = crpc_mgr.public() if crpc_mgr else None
             self._json(st)
             return
         self._json({"error": "not found"}, 404)

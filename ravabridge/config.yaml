@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.3.0"
+version: "0.4.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -48,6 +48,18 @@ options:
   page_listen: true
   page_group: "227.1.1.1"
   page_port: 1234
+  # Register with the Crestron Home processor as one or more intercom devices, so the rooms they
+  # live in are pageable and their audio is addressed to the bridge. Each device must already exist
+  # in the processor's config (added by Tools/mc4r_fake_panel.py) - its `uuid` is that device's
+  # RpcClientGuid. `pin` is the UI-device / commissioning password.
+  crpc:
+    host: ""
+    pin: "2129918115"
+  intercom_devices: []
+  #  - name: NAX Speakers
+  #    uuid: a99a07fd-019d-4353-9fb1-af265a49b721
+  #    room_id: 52008
+  #    sip_uri: nax@192.168.0.97
   # Optional: register into UniFi Talk as a third-party device so phones can ring the panels (audio).
   talk:
     host: ""
@@ -100,6 +112,15 @@ schema:
   page_listen: bool?
   page_group: str?
   page_port: int?
+  crpc:
+    host: str?
+    pin: password?
+  intercom_devices:
+    - name: str
+      uuid: str
+      room_id: int
+      sip_uri: str
+      model: str?
   talk:
     host: str?
     port: int?

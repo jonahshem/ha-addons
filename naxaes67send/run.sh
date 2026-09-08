@@ -15,6 +15,9 @@ export NAX_PASS=$(get nax_password)
 export AMPS_JSON=$(python3 -c "import json;print(json.dumps(json.load(open('$CONF')).get('amps') or []))" 2>/dev/null || echo '[]')
 export API_TOKEN=$(get api_token)
 export API_PORT=$(get api_port); export API_PORT=${API_PORT:-8099}
+# Padding around a clip. Empty is fine - api.py carries the defaults.
+export LEAD_SECONDS=$(get lead_seconds)
+export TAIL_SECONDS=$(get tail_seconds)
 echo "===== NAX AES67 sender $(date) ====="
 echo "iface=$IFACE mcast=$MCAST:$PORT session='$SESSION' api=$API_PORT"
 # Addresses only. The passwords are in the same file and must not be.
