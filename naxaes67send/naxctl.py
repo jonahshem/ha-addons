@@ -161,6 +161,12 @@ class Nax:
                 # Decays: stays true for about six seconds after a source is
                 # removed, so it proves presence and never absence.
                 "signal": (zs.get(name) or {}).get("IsSignalDetected"),
+                # Reported because it is the difference between an announcement
+                # that failed and one that played into a room turned down: at
+                # 14 Malke the Kitchen sat at 170 against the Living Room's 600
+                # and was simply inaudible, while every route and signal check
+                # said the page had worked.
+                "volume": ((zs.get(name) or {}).get("ZoneAudio") or {}).get("Volume"),
             }
         return out
 
@@ -254,6 +260,17 @@ class Nax:
     def route(self, zone, source):
         self._send({"Device": {"AvMatrixRouting": {"Routes": {zone: {"AudioSource": source}}}}})
 
+    def set_volume(self, zone, level):
+        """Set one zone's volume, on the amplifier's own 0-900 scale.
+
+        Not dB: the level a given step lands on depends on the zone's speaker
+        power and impedance settings, so 600 is -12.0 dB in 14 Malke's Kitchen
+        and -25.9 dB in its Living Room. Compare and set within a zone, never
+        across zones.
+        """
+        self._send({"Device": {"ZoneOutputs": {"Zones": {
+            zone: {"ZoneAudio": {"Volume": int(level)}}}}}})
+
     def route_sticky(self, zone, source, attempts=ATTEMPTS, settle=SETTLE):
         """Write one route until it holds. Returns the writes taken, or None."""
         return self.route_all({zone: source}, attempts, settle).get(zone)
@@ -331,7 +348,7 @@ def announce(host, user, password, zones, play, *, source=SOURCE,
 
 
 def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
-                  log=print, session_name="", address=""):
+                  log=print, session_name="", address="", floor=None):
     """Switch zones on one or more amplifiers, play once, put them all back.
 
     `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
@@ -345,9 +362,17 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     input is a room whose music never comes back - and that is a worse failure
     than the announcement not playing at all. Every amplifier is restored even
     if an earlier one threw on the way in.
+
+    `floor` raises any zone quieter than it for the duration, and puts it back
+    afterwards. A page that is only audible in the rooms somebody happened to
+    leave turned up is not a page; 14 Malke's Kitchen sat 25 dB below its Living
+    Room and heard nothing at all while every other check passed. It only ever
+    raises - a room already playing louder is left where it is, because turning
+    music DOWN to announce over it is the one thing nobody asks for.
     """
     conns = {}
     before = {}          # (host, zone) -> the source it had
+    volumes = {}         # (host, zone) -> the volume it had, if we raised it
     refused = []
     try:
         for host, zones in targets.items():
@@ -396,6 +421,13 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"it instead of restoring it")
                     was = ""
                 before[(host, zone)] = was
+                if floor:
+                    had = (was_all.get(zone) or {}).get("volume")
+                    if had is not None and had < floor:
+                        volumes[(host, zone)] = had
+                        nax.set_volume(zone, floor)
+                        log(f"[nax] {host} {zone}: volume {had} -> {floor} "
+                            f"for the announcement")
                 taking.append(zone)
             # All of this amplifier's zones together - see `route_all`.
             for zone, n in nax.route_all({z: source for z in taking}).items():
@@ -429,12 +461,25 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         log(f"[nax] {host} {zone}: restored to {wanted[zone]!r}")
             except Exception as e:
                 log(f"[nax] {host}: COULD NOT RESTORE ({e})")
+        # After the routes, so the room is back on its own source before it
+        # comes back up to its own level.
+        for (host, zone), had in volumes.items():
+            nax = conns.get(host)
+            if not nax:
+                continue
+            try:
+                nax.set_volume(zone, had)
+                log(f"[nax] {host} {zone}: volume back to {had}")
+            except Exception as e:
+                log(f"[nax] {host} {zone}: COULD NOT RESTORE VOLUME to "
+                    f"{had} ({e})")
         for nax in conns.values():
             try:
                 nax.close()
             except Exception:
                 pass
     return {"restored": {f"{h}:{z}": w for (h, z), w in before.items()},
+            "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
             "refused": refused}
 
 

@@ -81,6 +81,22 @@ LEAD_SECONDS = _secs("LEAD_SECONDS", 1.5)
 TAIL_SECONDS = _secs("TAIL_SECONDS", 3.0)
 
 
+def _floor():
+    """The volume a zone is brought up to for an announcement, 0-900.
+
+    0 or empty leaves every zone exactly as it was found, which is the right
+    setting for a house that would rather miss a page than have one raise the
+    volume in a room by itself.
+    """
+    try:
+        return int(float(os.environ.get("ANNOUNCE_VOLUME") or 600)) or None
+    except ValueError:
+        return 600
+
+
+ANNOUNCE_VOLUME = _floor()
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -185,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                 # whether the option actually reached the process.
                 "lead_seconds": LEAD_SECONDS,
                 "tail_seconds": TAIL_SECONDS,
+                "announce_volume": ANNOUNCE_VOLUME,
                 "amps": sorted(amps),
                 # The single most useful thing to know when a page is silent:
                 # the sender must be running for the route to bind at all.
@@ -414,7 +431,8 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             out = naxctl.announce_many(amps, targets, play, log=log,
-                                       session_name=SESSION, address=MCAST)
+                                       session_name=SESSION, address=MCAST,
+                                       floor=ANNOUNCE_VOLUME)
         except Exception as e:
             return self._fail(f"{type(e).__name__}: {e}")
 
@@ -427,6 +445,10 @@ class Handler(BaseHTTPRequestHandler):
             "refused": out["refused"],
             "seconds": round(seconds, 1),
             "restored": out["restored"],
+            # Which rooms were turned up to be heard, and from what. A page
+            # that is inaudible in one room looks identical to a working one
+            # without this.
+            "raised": out.get("raised") or {},
             "took": round(time.time() - started, 1),
         })
 

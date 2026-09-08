@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.3.8"
+version: "0.3.9"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64]
@@ -34,6 +34,11 @@ options:
   # when the route is put back). Tuned by ear, per house.
   lead_seconds: 1.5
   tail_seconds: 3.0
+  # The level a room is brought up to for an announcement, on the amplifier's
+  # own 0-900 scale (600 is what these zones are configured to default to).
+  # Only ever raises - a room already playing louder is left alone. Set 0 to
+  # never touch a volume, and accept that a room left turned down hears nothing.
+  announce_volume: 600
   api_port: 8099
 schema:
   iface: str
@@ -53,4 +58,5 @@ schema:
   api_token: str
   lead_seconds: float?
   tail_seconds: float?
+  announce_volume: int?
   api_port: int
