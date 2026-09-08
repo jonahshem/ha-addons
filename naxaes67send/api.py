@@ -44,6 +44,10 @@ import naxctl
 import sender
 
 PORT = int(os.environ.get("API_PORT", "8099"))
+# The STREAM's port, which the amplifier's receive slots must ask for. Not PORT
+# above - that is the port this HTTP server listens on. 0.5.2 confused the two
+# and "corrected" a working slot to 8099, which refused every page.
+RTP_PORT = int(os.environ.get("PORT") or 5004)
 TOKEN = os.environ.get("API_TOKEN", "")
 
 SESSION = os.environ.get("SESSION", "HA Announce 1")
@@ -498,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool, port=PORT)
+                                     pool=_pool, port=RTP_PORT)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] announcement failed: {broke['err']}")
@@ -599,7 +603,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool, port=PORT)
+                                     pool=_pool, port=RTP_PORT)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] live page failed: {broke['err']}")
