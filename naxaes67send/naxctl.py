@@ -62,6 +62,7 @@ class Nax:
         self.xsrf = ""
         self.ws = None
         self.routes = {}
+        self.landed = {}          # zone -> when its route was seen to bind
         self._stop = False
 
     @staticmethod
@@ -323,12 +324,19 @@ class Nax:
         return out
 
     def _lands(self, zone, source, window, step=0.05):
-        """Wait up to `window` for a route to appear. Did it?"""
+        """Wait up to `window` for a route to appear. Did it?
+
+        Records WHEN it appeared. The zone starts fading in on its new source
+        at that instant, not when we finish satisfying ourselves that the route
+        stuck - and those are two names for the same 1.5 seconds. A caller that
+        waits out the watch and THEN waits a lead pays for it twice.
+        """
         deadline = time.time() + window
         while not self._holding(zone, source):
             if time.time() >= deadline:
                 return False
             time.sleep(step)
+        self.landed[zone] = time.time()
         return True
 
     def _stays(self, zone, source, window, step=0.05):
@@ -473,6 +481,12 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         "restored": {f"{h}:{z}": w for (h, z), w in before.items()},
                         "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
                         "refused": list(refused),
+                        # When the LAST zone bound. Its lead has been running
+                        # ever since - the caller should wait out whatever is
+                        # left of it, not start a fresh one.
+                        "landed_at": max(
+                            [t for c in conns.values() for t in c.landed.values()]
+                            or [time.time()]),
                     })
                 except Exception as e:
                     log(f"[nax] ready callback raised, continuing: {e}")

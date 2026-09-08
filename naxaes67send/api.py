@@ -422,7 +422,13 @@ class Handler(BaseHTTPRequestHandler):
             # the amplifier settling on the new source. Speaking into a zone
             # that has not finished switching loses the first syllable, which
             # is usually somebody's name.
-            time.sleep(LEAD_SECONDS)
+            # Whatever is LEFT of the lead. The zone has been fading in since
+            # its route bound, and confirming that route already took a settle,
+            # so by now the lead is usually spent - waiting a fresh 1.5s here
+            # was 1.5s of silence added to every announcement for nothing.
+            spent = time.time() - info.get("landed_at", time.time())
+            if spent < LEAD_SECONDS:
+                time.sleep(LEAD_SECONDS - spent)
             sender.play(pcm)
 
             # 🔴 Do NOT wait on is_playing() alone. It goes false when the last
