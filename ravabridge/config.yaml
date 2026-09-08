@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.4.1"
+version: "0.5.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -48,6 +48,14 @@ options:
   page_listen: true
   page_group: "227.1.1.1"
   page_port: 1234
+  # Send a live page on to the NAX speakers: the page's G.711 audio is decoded,
+  # resampled and streamed to the AES67 sender add-on while it is still being
+  # spoken. `url` is that add-on's API, `zones` the NAX zones to play it in.
+  page_relay:
+    enabled: false
+    url: "http://127.0.0.1:8099"
+    token: "2129918115"
+    zones: []
   # Register with the Crestron Home processor as one or more intercom devices, so the rooms they
   # live in are pageable and their audio is addressed to the bridge. Each device must already exist
   # in the processor's config (added by Tools/mc4r_fake_panel.py) - its `uuid` is that device's
@@ -113,6 +121,12 @@ schema:
   page_listen: bool?
   page_group: str?
   page_port: int?
+  page_relay:
+    enabled: bool?
+    url: str?
+    token: password?
+    zones:
+      - str
   crpc:
     host: str?
     pin: password?

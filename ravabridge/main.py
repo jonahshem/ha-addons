@@ -46,7 +46,8 @@ if __name__ == "__main__":
         threading.Thread(target=discovery_loop, daemon=True).start()
     if cfg.get("page_listen", True):
         import pages
-        b.pages = pages.PageListener(b, cfg.get("page_group") or "227.1.1.1", cfg.get("page_port") or 1234, log)
+        b.pages = pages.PageListener(b, cfg.get("page_group") or "227.1.1.1", cfg.get("page_port") or 1234, log,
+                                     relay=cfg.get("page_relay") or {})
         b.pages.start()
     import crpc
     b.crpc = crpc.CrpcManager(cfg, log)

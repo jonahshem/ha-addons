@@ -10,6 +10,7 @@ COPY bridge.py /bridge.py
 COPY api.py /api.py
 COPY discover.py /discover.py
 COPY pages.py /pages.py
+COPY pageaudio.py /pageaudio.py
 COPY crpc.py /crpc.py
 COPY sip.py /sip.py
 COPY rtp.py /rtp.py

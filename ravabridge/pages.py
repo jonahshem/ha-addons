@@ -22,11 +22,14 @@ import sip
 
 
 class PageListener:
-    def __init__(self, bridge, group="227.1.1.1", port=1234, log=None):
+    def __init__(self, bridge, group="227.1.1.1", port=1234, log=None, relay=None):
         self.b = bridge
         self.group = group
         self.port = int(port)
         self.log = log or print
+        # Where a live page is sent on to. Off unless configured.
+        self.relay_cfg = relay or {}
+        self.relayed = {"pages": 0, "bytes": 0, "last": None}
         self.pages = deque(maxlen=40)         # what was seen, newest last
         self.raw = {"sip": 0, "rtp": 0, "other": 0}
         self.media = {}                       # (group, port) -> {"sock", "packets", "pt", "first", "last", "page"}
@@ -137,6 +140,7 @@ class PageListener:
             if not pkt:
                 continue
             self._rtp((rec["group"], rec["port"]), pkt, addr, rec)
+        self._relay_stop(rec)
         try:
             s.close()
         except OSError:
@@ -162,18 +166,66 @@ class PageListener:
                        "group": where[0], "port": where[1], "bytes": 0}
                 with self.lock:
                     self.media[where] = rec
+        first_packet = rec["packets"] == 0
         rec["packets"] += 1
         rec["bytes"] += len(pkt["payload"])
         rec["pt"] = pkt["pt"]
         rec["src"] = f"{addr[0]}:{addr[1]}"
         rec["first"] = rec["first"] or now
         rec["last"] = now
+        if first_packet:
+            self._relay_start(rec)
+        self._relay_push(rec, pkt)
+
+    # -- sending a live page on to the NAX speakers -------------------------
+    def _relay_start(self, rec):
+        """A page has started. Open the stream to the AES67 sender.
+
+        Only for G.711 u-law (payload type 0), which is what a Crestron page
+        is; anything else is left alone rather than mistranslated.
+        """
+        cfg = self.relay_cfg
+        if not cfg.get("enabled") or rec.get("relay") is not None:
+            return
+        import pageaudio
+        rec["conv"] = pageaudio.Ulaw48k()
+        rec["relay"] = pageaudio.PageRelay(cfg.get("url") or "", cfg.get("token") or "",
+                                           cfg.get("zones") or [], log=self.log)
+        # Started lazily on the first u-law packet, so a non-audio blip on the
+        # group does not route the house's zones for nothing.
+        rec["relay_armed"] = True
+
+    def _relay_push(self, rec, pkt):
+        relay = rec.get("relay")
+        if relay is None or pkt["pt"] != 0 or not pkt["payload"]:
+            return
+        if rec.get("relay_armed"):
+            rec["relay_armed"] = False
+            if not relay.start():
+                rec["relay"] = None
+                return
+            self.b.note(f"page: relaying to the NAX zones {relay.zones}")
+        relay.push(rec["conv"].convert(pkt["payload"]))
+
+    def _relay_stop(self, rec):
+        relay = rec.get("relay")
+        if relay is None:
+            return
+        rec["relay"] = None
+        if not relay.open:
+            return
+        out = relay.stop()
+        self.relayed["pages"] += 1
+        self.relayed["bytes"] += (out or {}).get("bytes", 0)
+        self.relayed["last"] = {"t": time.time(), **(out or {})}
+        self.b.note(f"page: relay finished, {(out or {}).get('bytes', 0)} bytes to the NAX zones")
 
     def _reap(self):
         # RTP seen directly on the paging address, gone quiet: report it.
         now = time.time()
         for key, rec in list(self.media.items()):
             if rec["sock"] is None and rec["last"] and now - rec["last"] > 3:
+                self._relay_stop(rec)
                 dur = rec["last"] - rec["first"]
                 self.b.note(f"page audio on {key[0]}:{key[1]}: {rec['packets']} packets, pt {rec['pt']}, "
                             f"{rec['bytes']} bytes, {dur:.1f}s, from {rec.get('src')}")
@@ -187,4 +239,7 @@ class PageListener:
         with self.lock:
             return {"group": f"{self.group}:{self.port}", "counters": dict(self.raw),
                     "listening_media": [f"{k[0]}:{k[1]}" for k in self.media],
+                    "relay": {"enabled": bool(self.relay_cfg.get("enabled")),
+                              "zones": self.relay_cfg.get("zones") or [],
+                              **self.relayed},
                     "seen": list(self.pages)}

@@ -32,6 +32,7 @@ Anything the *amplifier* refuses is answered **200 with `ok: false`**, not a
 """
 import json
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -59,6 +60,9 @@ _pool = naxctl.Pool(log=lambda m: log(m))
 
 MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
+# A live page, in the stream's own format: 288000 bytes a second. This is the
+# same ceiling as MAX_HOLD, expressed in bytes.
+MAX_LIVE = MAX_HOLD * 48000 * 2 * 3
 MAX_BODY = 8192                    # for the JSON endpoints, not the audio one
 
 # Silence padded around every clip, both measured by ear at 14 Malke rather than
@@ -265,6 +269,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._repair()
         if tail == "/announce":
             return self._announce()
+        if tail == "/live":
+            return self._live()
         if tail == "/clips":
             return self._save_clip()
         if tail == "/clipdelete":
@@ -523,6 +529,132 @@ class Handler(BaseHTTPRequestHandler):
             "took": round(time.time() - started, 1),
         })
 
+
+    # -- a live page, streamed in while it is still being spoken -----------
+    def _live(self):
+        """Play a page into the zones as it arrives.
+
+        The body is a stream of S24BE/48k/2ch PCM - already the stream's own
+        format, because whoever produced it (RavaBridge, from the page's G.711)
+        can convert far more cheaply than a second pipeline here could. The
+        zones are routed when the request arrives and put back when the body
+        ends, so the caller closing the stream is what restores the house.
+
+        The page trails the panels by however long routing takes; nothing is
+        dropped for that, because a page that starts two seconds late is worth
+        more than one missing its first two seconds.
+        """
+        amps = amplifiers()
+        if not amps:
+            return self._fail("No amplifier configured")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        targets, unknown = {}, []
+        for ref in (q.get("zones", [""])[0] or "").split(","):
+            if not ref.strip():
+                continue
+            host, zone = split_zone(ref)
+            if not host:
+                if len(amps) != 1:
+                    unknown.append(ref)
+                    continue
+                host = next(iter(amps))
+            if host not in amps:
+                unknown.append(ref)
+                continue
+            targets.setdefault(host, []).append(zone)
+        if unknown:
+            return self._fail(f"Not a zone here: {', '.join(unknown)}")
+        if not targets:
+            return self._fail("Name at least one zone")
+        if not _speaking.acquire(blocking=False):
+            return self._fail("Another announcement is playing")
+        worker_owns = []
+        try:
+            return self._live_locked(amps, targets, worker_owns)
+        finally:
+            if not worker_owns:
+                _speaking.release()
+
+    def _live_locked(self, amps, targets, worker_owns):
+        audio = queue.Queue(maxsize=400)
+        info, broke, done = {}, {}, threading.Event()
+        started = time.time()
+
+        def play():
+            while True:
+                chunk = audio.get()
+                if chunk is None:
+                    break
+                sender.play(chunk)
+            # The last buffers are still in flight when the queue runs dry.
+            time.sleep(TAIL_SECONDS)
+
+        def run():
+            try:
+                naxctl.announce_many(amps, targets, play, log=log,
+                                     session_name=SESSION, address=MCAST,
+                                     floor=ANNOUNCE_VOLUME, ready=info.update,
+                                     pool=_pool)
+            except Exception as e:
+                broke["err"] = f"{type(e).__name__}: {e}"
+                log(f"[api] live page failed: {broke['err']}")
+            finally:
+                done.set()
+                _speaking.release()
+
+        worker_owns.append(True)
+        threading.Thread(target=run, name="live-page", daemon=True).start()
+
+        total = 0
+        try:
+            for chunk in self._read_stream(MAX_LIVE):
+                total += len(chunk)
+                audio.put(chunk, timeout=30)
+        except Exception as e:
+            log(f"[api] live page stream ended: {type(e).__name__}: {e}")
+        finally:
+            audio.put(None)
+
+        done.wait(LEAD_SECONDS + TAIL_SECONDS + 120)
+        if broke:
+            return self._fail(broke["err"])
+        spoke = [z for z in info.get("restored", {}) if z not in info.get("refused", [])]
+        return self._json({
+            "ok": bool(spoke),
+            "zones": spoke,
+            "refused": info.get("refused") or [],
+            "seconds": round(total / (48000 * 2 * 3), 1),
+            "bytes": total,
+            "restored": info.get("restored") or {},
+            "raised": info.get("raised") or {},
+            "took": round(time.time() - started, 1),
+        })
+
+    def _read_stream(self, cap):
+        """The body a piece at a time, chunked or not."""
+        if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":
+            total = 0
+            while True:
+                line = self.rfile.readline(80).strip()
+                if not line:
+                    return
+                try:
+                    n = int(line.split(b";")[0], 16)
+                except ValueError:
+                    return
+                if n == 0:
+                    self.rfile.readline(8)
+                    return
+                data = self.rfile.read(n)
+                self.rfile.read(2)
+                total += len(data)
+                if total > cap:
+                    raise ValueError("more audio than a page")
+                yield data
+        else:
+            blob = self._body(cap)
+            if blob:
+                yield blob
 
     # -- stored clips ------------------------------------------------------
     def _save_clip(self):
