@@ -162,6 +162,12 @@ class VirtualDevice:
                         self.registered_at = now
                         last_hb = now
                         self.mgr.log(f"crpc: {self.name} registered ({self.status})")
+                    elif t == 0x14 and self.mgr.debug and len(body) > 1:
+                        # Log what the processor sends the client - the page-join protocol lives here.
+                        txt = body[1:].decode("utf-8", "replace")
+                        for piece in txt.replace("}{", "}\x00{").split("\x00"):
+                            if '"method"' in piece and '"connectionStatus"' not in piece:
+                                self.mgr.log(f"crpc<< {self.name}: {piece[:500]}")
             if self.online and not did_setup:
                 ss.sendall(_data_frame({"method": "IRpcHouse.ReportClientAssignedRoom", "id": self._next_id(),
                                         "jsonrpc": "2.0", "params": {"roomId": self.room_id}}))
@@ -185,6 +191,7 @@ class CrpcManager:
         c = cfg.get("crpc") or {}
         self.host = str(c.get("host") or "").strip()
         self.pin = str(c.get("pin") or "2129918115")
+        self.debug = bool(c.get("debug"))
         self.devices = [VirtualDevice(self, d) for d in (cfg.get("intercom_devices") or [])]
         self.devices = [d for d in self.devices if d.ok]
 

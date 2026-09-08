@@ -20,6 +20,7 @@ export LEAD_SECONDS=$(get lead_seconds)
 export TAIL_SECONDS=$(get tail_seconds)
 echo "===== NAX AES67 sender $(date) ====="
 echo "iface=$IFACE mcast=$MCAST:$PORT session='$SESSION' api=$API_PORT"
+echo "lead=${LEAD_SECONDS:-1.5}s tail=${TAIL_SECONDS:-3.0}s"
 # Addresses only. The passwords are in the same file and must not be.
 python3 -c "import json,os;print('amps:', [a.get('host') for a in json.loads(os.environ['AMPS_JSON'])] or [os.environ.get('NAX_HOST') or '(none)'])"
 exec python3 -u /main.py

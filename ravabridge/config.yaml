@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.4.0"
+version: "0.4.1"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -55,6 +55,7 @@ options:
   crpc:
     host: ""
     pin: "2129918115"
+    debug: false
   intercom_devices: []
   #  - name: NAX Speakers
   #    uuid: a99a07fd-019d-4353-9fb1-af265a49b721
@@ -115,6 +116,7 @@ schema:
   crpc:
     host: str?
     pin: password?
+    debug: bool?
   intercom_devices:
     - name: str
       uuid: str
