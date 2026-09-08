@@ -384,12 +384,23 @@ class Handler(BaseHTTPRequestHandler):
             # Honest rather than queued: by the time the first page finished,
             # the second would be stale and nobody would know why it was late.
             return self._fail("Another announcement is playing")
-        try:
-            return self._speak(blob, amps, targets)
-        finally:
-            _speaking.release()
+        # `_speak` owns the lock from here. It is released when the zones are
+        # back, which now happens AFTER this response has gone out - so a page
+        # arriving during that window is still refused rather than colliding.
+        return self._speak(blob, amps, targets)
 
     def _speak(self, blob, amps, targets):
+        # A one-element list rather than a flag: the worker thread below takes
+        # the lock over when it starts, and every path that never reaches it
+        # has to hand the lock back here instead.
+        worker_owns = []
+        try:
+            return self._speak_locked(blob, amps, targets, worker_owns)
+        finally:
+            if not worker_owns:
+                _speaking.release()
+
+    def _speak_locked(self, blob, amps, targets, worker_owns):
         tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
         tmp.write(blob)
         tmp.close()
@@ -428,27 +439,59 @@ class Handler(BaseHTTPRequestHandler):
             deadline = time.time() + seconds + TAIL_SECONDS
             while time.time() < deadline or sender.is_playing():
                 time.sleep(0.05)
+            heard.set()
 
-        try:
-            out = naxctl.announce_many(amps, targets, play, log=log,
-                                       session_name=SESSION, address=MCAST,
-                                       floor=ANNOUNCE_VOLUME)
-        except Exception as e:
-            return self._fail(f"{type(e).__name__}: {e}")
+        # 🔴 The restore is NOT on the caller's critical path.
+        #
+        # Putting the zones back takes as long as taking them did, and for most
+        # of this add-on's life the caller sat through it - a three second clip
+        # answered in fifteen. Nothing is gained by that wait: the restore runs
+        # at the same moment whether or not somebody is watching it, so all the
+        # waiting bought was a later answer. What it cost was real, because the
+        # driver's "Announcement Finished" event fires on this response and so
+        # landed seconds after the room had gone quiet again.
+        #
+        # The lock is held until the restore is genuinely done, so the next page
+        # is refused rather than starting on top of a half-restored house.
+        info, broke, heard = {}, {}, threading.Event()
 
-        spoke = [z for z in out["restored"] if z not in out["refused"]]
+        def run():
+            try:
+                naxctl.announce_many(amps, targets, play, log=log,
+                                     session_name=SESSION, address=MCAST,
+                                     floor=ANNOUNCE_VOLUME, ready=info.update)
+            except Exception as e:
+                broke["err"] = f"{type(e).__name__}: {e}"
+                log(f"[api] announcement failed: {broke['err']}")
+            finally:
+                # Both of these on every path, or a failure before the audio
+                # would hang this request and wedge the lock shut for good.
+                heard.set()
+                _speaking.release()
+
+        worker_owns.append(True)
+        threading.Thread(target=run, name="announce", daemon=True).start()
+        # Generous: routing can retry, and answering late beats answering with
+        # a half-truth. Reached only if the amplifier stops responding.
+        heard.wait(LEAD_SECONDS + seconds + TAIL_SECONDS + 90)
+
+        if broke:
+            return self._fail(broke["err"])
+        spoke = [z for z in info.get("restored", {}) if z not in info.get("refused", [])]
         if not spoke:
             return self._fail("No zone would take the announcement")
         return self._json({
             "ok": True,
             "zones": spoke,
-            "refused": out["refused"],
+            "refused": info.get("refused") or [],
             "seconds": round(seconds, 1),
-            "restored": out["restored"],
+            # What each zone is being put back to. By the time this is read the
+            # restore is usually done; it is what WILL happen, not what has.
+            "restored": info.get("restored") or {},
             # Which rooms were turned up to be heard, and from what. A page
             # that is inaudible in one room looks identical to a working one
             # without this.
-            "raised": out.get("raised") or {},
+            "raised": info.get("raised") or {},
             "took": round(time.time() - started, 1),
         })
 

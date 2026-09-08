@@ -306,16 +306,39 @@ class Nax:
             out[zone] = None
             for i in range(attempts):
                 self.route(zone, source)
-                time.sleep(settle)
-                # Held once. Not yet believed - this is exactly the moment
-                # the device is about to clear it.
-                if not self._holding(zone, source):
+                # Wait for it to LAND, rather than for a fixed settle. The
+                # websocket pushes the change, so this is usually about a
+                # tenth of a second; it used to cost a flat 1.5 s whether the
+                # device answered instantly or not.
+                if not self._lands(zone, source, settle):
                     continue
-                time.sleep(settle)
-                if self._holding(zone, source):
+                # Then watch it for a full settle, because this is exactly the
+                # moment the device is about to clear it, and the only way to
+                # know it did not is to keep looking. Continuously, not at the
+                # two instants the old code sampled - a route that was cleared
+                # and re-bound in between used to pass.
+                if self._stays(zone, source, settle):
                     out[zone] = i + 1
                     break
         return out
+
+    def _lands(self, zone, source, window, step=0.05):
+        """Wait up to `window` for a route to appear. Did it?"""
+        deadline = time.time() + window
+        while not self._holding(zone, source):
+            if time.time() >= deadline:
+                return False
+            time.sleep(step)
+        return True
+
+    def _stays(self, zone, source, window, step=0.05):
+        """Watch a route that has landed for `window`. Did it survive?"""
+        deadline = time.time() + window
+        while time.time() < deadline:
+            if not self._holding(zone, source):
+                return False
+            time.sleep(step)
+        return self._holding(zone, source)
 
     def subscribe(self, stream, session_name, address):
         """Point a zone's Rx slot at our announced stream.
@@ -348,7 +371,8 @@ def announce(host, user, password, zones, play, *, source=SOURCE,
 
 
 def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
-                  log=print, session_name="", address="", floor=None):
+                  log=print, session_name="", address="", floor=None,
+                  ready=None):
     """Switch zones on one or more amplifiers, play once, put them all back.
 
     `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
@@ -438,6 +462,20 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     log(f"[nax] {host} {zone}: {source} bound after {n} "
                         f"write(s), was {before[(host, zone)]!r}")
         if len(before) > len(refused) or not refused:
+            # Everything the caller needs to answer with is already known here:
+            # which zones were taken, what each will go back to, which were
+            # turned up. Handing it over now lets a caller reply as soon as the
+            # room has heard the announcement instead of waiting out the
+            # restore - which happens at the same moment either way.
+            if ready:
+                try:
+                    ready({
+                        "restored": {f"{h}:{z}": w for (h, z), w in before.items()},
+                        "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
+                        "refused": list(refused),
+                    })
+                except Exception as e:
+                    log(f"[nax] ready callback raised, continuing: {e}")
             play()
     finally:
         # Per amplifier and all at once, for the same reason as above - and
