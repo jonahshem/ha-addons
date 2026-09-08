@@ -52,6 +52,11 @@ MCAST = os.environ.get("MCAST", "239.69.4.4")
 # through one amplifier is worse than the second one waiting.
 _speaking = threading.Lock()
 
+# One logged-in session per amplifier, shared by pages and by the tile's zone
+# list. See naxctl.Pool: this is what removes the login and websocket handshake
+# from the front of every announcement.
+_pool = naxctl.Pool(log=lambda m: log(m))
+
 MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
 MAX_BODY = 8192                    # for the JSON endpoints, not the audio one
@@ -222,9 +227,16 @@ class Handler(BaseHTTPRequestHandler):
                     trouble[host] = "No password is saved for this amplifier"
                     continue
                 try:
-                    nax = naxctl.Nax(host, cfg["user"], cfg["password"], log=log)
-                    nax.login()
-                    for zone, info in nax.zones().items():
+                    # Through the pool as well, so the tile's list is served by
+                    # the same session a page uses instead of logging in again.
+                    try:
+                        nax = _pool.get(host, cfg)
+                        listing = nax.zones()
+                    except Exception:
+                        _pool.drop(host)
+                        nax = _pool.get(host, cfg)
+                        listing = nax.zones()
+                    for zone, info in listing.items():
                         zones[f"{host}:{zone}"] = dict(
                             info, host=host, zone=zone,
                             # On our own input with nothing being announced -
@@ -474,7 +486,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
-                                     floor=ANNOUNCE_VOLUME, ready=info.update)
+                                     floor=ANNOUNCE_VOLUME, ready=info.update,
+                                     pool=_pool)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] announcement failed: {broke['err']}")

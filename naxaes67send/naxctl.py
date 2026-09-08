@@ -64,6 +64,12 @@ class Nax:
         self.routes = {}
         self.landed = {}          # zone -> when its route was seen to bind
         self._stop = False
+        self._thread = None
+        self._rx_ok = set()       # receive slots already confirmed as ours
+        # websocket-client's send is not thread-safe, and a pooled connection
+        # is shared: an announcement writing routes while the tile reads zones
+        # would interleave two frames into one.
+        self._wlock = threading.Lock()
 
     @staticmethod
     def _lax():
@@ -146,15 +152,24 @@ class Nax:
 
     def zones(self):
         """Every zone: what it is called, its source, whether audio is there."""
-        out = {}
-        try:
-            routes = self.get("AvMatrixRouting")["AvMatrixRouting"]["Routes"]
-        except Exception:
-            routes = {}
-        try:
-            zs = self.get("ZoneOutputs")["ZoneOutputs"]["Zones"]
-        except Exception:
-            zs = {}
+        # Two independent reads, so take them at the same time rather than one
+        # after the other - this is the last REST round trip standing between a
+        # page being asked for and the route being written.
+        got = {}
+
+        def fetch(key, path):
+            try:
+                got[key] = self.get(path)[path][key]
+            except Exception:
+                got[key] = {}
+
+        threads = [threading.Thread(target=fetch, args=a) for a in
+                   (("Routes", "AvMatrixRouting"), ("Zones", "ZoneOutputs"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        out, routes, zs = {}, got["Routes"], got["Zones"]
         for name in sorted(set(routes) | set(zs), key=_zone_order):
             out[name] = {
                 "name": self._label(zs.get(name)) or self._label(routes.get(name)),
@@ -198,9 +213,15 @@ class Nax:
         except ValueError as e:
             raise NaxError(f"{zone} is not a zone name") from e
         slot = f"Stream{n:02d}"
+        # Already confirmed on this session. The slot does not wander while we
+        # hold the connection, and re-checking costs a REST round trip on every
+        # single page - or a whole SETTLE, if it decides to write again.
+        if (slot, session_name) in self._rx_ok:
+            return False
         cur = self.rx_streams().get(slot) or {}
         mine = (cur.get("SessionNameRequested") or cur.get("SessionName") or "").strip()
         if mine == session_name:
+            self._rx_ok.add((slot, session_name))
             return False
         if mine:
             raise NaxError(
@@ -208,6 +229,7 @@ class Nax:
                 f"leaving it alone rather than taking it over")
         self.subscribe(slot, session_name, address)
         time.sleep(SETTLE)
+        self._rx_ok.add((slot, session_name))
         return True
 
     # -- the WebSocket, for writing ---------------------------------------
@@ -218,8 +240,24 @@ class Nax:
             header=[f"Cookie: {self._cookie_header()}",
                     f"Referer: https://{self.host}/"],
             origin=f"https://{self.host}", timeout=20)
-        threading.Thread(target=self._listen, daemon=True).start()
+        self._stop = False
+        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._thread.start()
         return self
+
+    def alive(self):
+        """Is this session still usable, without asking the amplifier?
+
+        The websocket is the fragile half: `_listen` swallows exceptions so a
+        dropped socket does not raise anywhere - it just stops updating
+        `routes`, and every route write afterwards fails to land and burns six
+        attempts before giving up. Checking is cheaper than that.
+        """
+        if self._stop or self.ws is None:
+            return False
+        if self._thread is not None and not self._thread.is_alive():
+            return False
+        return bool(getattr(self.ws, "connected", False))
 
     def _listen(self):
         self.ws.settimeout(0.6)
@@ -256,7 +294,8 @@ class Nax:
                 pass
 
     def _send(self, obj):
-        self.ws.send(json.dumps(obj))
+        with self._wlock:
+            self.ws.send(json.dumps(obj))
 
     def route(self, zone, source):
         self._send({"Device": {"AvMatrixRouting": {"Routes": {zone: {"AudioSource": source}}}}})
@@ -378,9 +417,63 @@ def announce(host, user, password, zones, play, *, source=SOURCE,
                          restore={host: restore} if restore else None)
 
 
+class Pool:
+    """One logged-in, websocket-open session per amplifier, kept between pages.
+
+    A page used to spend about a second before routing anything: an HTTPS
+    login, a websocket handshake, a zones read and a receive-slot check, every
+    time, against an amplifier this process already holds a permanent stream
+    to. The login and the socket are the parts that do not need repeating.
+
+    A pooled session is dropped rather than repaired the moment it looks wrong.
+    Reconnecting costs a third of a second; guessing wrong about a stale
+    session costs a page, and this add-on's worst failures have all been rooms
+    left silent by something that carried on as if it had worked.
+    """
+
+    def __init__(self, log=print):
+        self._conns = {}
+        self._lock = threading.Lock()
+        self.log = log
+
+    def get(self, host, cfg):
+        with self._lock:
+            nax = self._conns.get(host)
+            if nax is not None:
+                if nax.alive():
+                    return nax
+                self.log(f"[nax] {host}: pooled session went away, reconnecting")
+                self._retire(host, nax)
+            nax = Nax(host, cfg.get("user") or "admin",
+                      cfg.get("password") or "", log=self.log)
+            nax.login()
+            nax.open()
+            self._conns[host] = nax
+            return nax
+
+    def drop(self, host):
+        """Throw a session away - call this whenever one has misbehaved."""
+        with self._lock:
+            nax = self._conns.pop(host, None)
+            if nax is not None:
+                self._retire(host, nax)
+
+    def _retire(self, host, nax):
+        self._conns.pop(host, None)
+        try:
+            nax.close()
+        except Exception:
+            pass
+
+    def close(self):
+        with self._lock:
+            for host, nax in list(self._conns.items()):
+                self._retire(host, nax)
+
+
 def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                   log=print, session_name="", address="", floor=None,
-                  ready=None):
+                  ready=None, pool=None):
     """Switch zones on one or more amplifiers, play once, put them all back.
 
     `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
@@ -409,16 +502,34 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     try:
         for host, zones in targets.items():
             cfg = amps.get(host) or {}
-            nax = Nax(host, cfg.get("user") or "admin", cfg.get("password") or "",
-                      log=log)
-            nax.login()
-            nax.open()
-            conns[host] = nax
             # Read every zone once, not once per zone. Each read is two HTTPS
             # round trips to the amplifier, and paging the whole house would
             # otherwise spend a dozen of them standing there before anybody
             # heard anything.
-            was_all = nax.zones()
+            #
+            # This doubles as the health check on a pooled session: it is the
+            # first REST call of the page, so an expired login fails HERE,
+            # before anything has been routed, and can be retried on a fresh
+            # connection at the cost of a third of a second. `alive()` cannot
+            # see that - it only knows about the websocket.
+            for attempt in (1, 2):
+                try:
+                    if pool is not None:
+                        nax = pool.get(host, cfg)
+                    else:
+                        nax = Nax(host, cfg.get("user") or "admin",
+                                  cfg.get("password") or "", log=log)
+                        nax.login()
+                        nax.open()
+                    was_all = nax.zones()
+                    break
+                except Exception as e:
+                    if pool is None or attempt == 2:
+                        raise
+                    log(f"[nax] {host}: pooled session did not answer "
+                        f"({type(e).__name__}), rebuilding it")
+                    pool.drop(host)
+            conns[host] = nax
             taking = []
             for zone in zones:
                 if session_name:
@@ -525,11 +636,14 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
             except Exception as e:
                 log(f"[nax] {host} {zone}: COULD NOT RESTORE VOLUME to "
                     f"{had} ({e})")
-        for nax in conns.values():
-            try:
-                nax.close()
-            except Exception:
-                pass
+        # A pooled session stays open - that is the whole point of it. Only
+        # connections this call built are torn down here.
+        if pool is None:
+            for nax in conns.values():
+                try:
+                    nax.close()
+                except Exception:
+                    pass
     return {"restored": {f"{h}:{z}": w for (h, z), w in before.items()},
             "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
             "refused": refused}
