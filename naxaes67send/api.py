@@ -427,8 +427,17 @@ class Handler(BaseHTTPRequestHandler):
             # so by now the lead is usually spent - waiting a fresh 1.5s here
             # was 1.5s of silence added to every announcement for nothing.
             spent = time.time() - info.get("landed_at", time.time())
-            if spent < LEAD_SECONDS:
-                time.sleep(LEAD_SECONDS - spent)
+            waiting = max(0.0, LEAD_SECONDS - spent)
+            if waiting:
+                time.sleep(waiting)
+            # Say where the time actually went, every time. "How long before
+            # anybody hears it" was answered for three versions by inference -
+            # timing the whole call, polling a flag at 5 Hz from another
+            # machine - and the answers kept being confounded by how many
+            # writes the route happened to take. It is one subtraction from
+            # inside the process; there is no reason to guess at it.
+            log(f"[api] lead: route bound {spent:.2f}s ago, waited {waiting:.2f}s "
+                f"more; audio starts {time.time() - started:.2f}s after the request")
             sender.play(pcm)
 
             # 🔴 Do NOT wait on is_playing() alone. It goes false when the last

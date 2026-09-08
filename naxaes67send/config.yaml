@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.4.1"
+version: "0.4.2"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64]
