@@ -52,6 +52,10 @@ MCAST = os.environ.get("MCAST", "239.69.4.4")
 # One announcement at a time, per house. Two pages talking over each other
 # through one amplifier is worse than the second one waiting.
 _speaking = threading.Lock()
+# How long a page waits for the one before it to finish restoring, before it is
+# refused. The restore runs on past the response; a tap in that window used to
+# be dropped without a trace.
+WAIT_FOR_TURN = 10.0
 
 # One logged-in session per amplifier, shared by pages and by the tile's zone
 # list. See naxctl.Pool: this is what removes the login and websocket handshake
@@ -164,6 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _fail(self, msg):
+        log(f"[api] refused: {msg}")
         """An amplifier-level failure, answered 200.
 
         🔴 Not a 5xx. This add-on is reached through Home Assistant, and a
@@ -334,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             return self._fail(
                 f"No password is saved for {', '.join(sorted(missing))}")
-        if not _speaking.acquire(blocking=False):
+        if not _speaking.acquire(timeout=WAIT_FOR_TURN):
             return self._fail("An announcement is playing")
         try:
             found = naxctl.stray(amps, log=log)
@@ -398,7 +403,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(blob) > MAX_AUDIO:
             return self._json({"error": "That is more audio than a page"}, 413)
 
-        if not _speaking.acquire(blocking=False):
+        if not _speaking.acquire(timeout=WAIT_FOR_TURN):
             # Honest rather than queued: by the time the first page finished,
             # the second would be stale and nobody would know why it was late.
             return self._fail("Another announcement is playing")
@@ -493,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool)
+                                     pool=_pool, port=PORT)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] announcement failed: {broke['err']}")
@@ -566,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail(f"Not a zone here: {', '.join(unknown)}")
         if not targets:
             return self._fail("Name at least one zone")
-        if not _speaking.acquire(blocking=False):
+        if not _speaking.acquire(timeout=WAIT_FOR_TURN):
             return self._fail("Another announcement is playing")
         worker_owns = []
         try:
@@ -594,7 +599,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool)
+                                     pool=_pool, port=PORT)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] live page failed: {broke['err']}")

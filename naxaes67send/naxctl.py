@@ -193,7 +193,7 @@ class Nax:
         except Exception:
             return {}
 
-    def ensure_rx(self, zone, session_name, address):
+    def ensure_rx(self, zone, session_name, address, port=5004):
         """Point ZoneN's receive slot at our stream, if it is ours to point.
 
         `Stream0N` belongs to `ZoneN` - Stream04 is Deck. A slot that is empty,
@@ -221,13 +221,24 @@ class Nax:
         cur = self.rx_streams().get(slot) or {}
         mine = (cur.get("SessionNameRequested") or cur.get("SessionName") or "").strip()
         if mine == session_name:
-            self._rx_ok.add((slot, session_name))
-            return False
+            # The name alone is not "right". Stream06 at 14 Malke carried our
+            # session name and port 4570 - a leftover from an early sender - and
+            # this check waved it through for days while the Social Room heard
+            # nothing. Address and port have to agree too. Corrected in place
+            # by a plain re-subscribe; never by stopping the slot (see subscribe).
+            wrong = (str(cur.get("PortRequested") or "") != str(port)
+                     or (cur.get("NetworkAddressRequested") or "") != address)
+            if not wrong:
+                self._rx_ok.add((slot, session_name))
+                return False
+            self.log(f"[nax] {self.host} {zone}: receive slot names our session "
+                     f"but asks for {cur.get('NetworkAddressRequested')}:"
+                     f"{cur.get('PortRequested')} - correcting to {address}:{port}")
         if mine:
             raise NaxError(
                 f"{zone}'s receive slot is already carrying {mine!r} - "
                 f"leaving it alone rather than taking it over")
-        self.subscribe(slot, session_name, address)
+        self.subscribe(slot, session_name, address, port)
         time.sleep(SETTLE)
         self._rx_ok.add((slot, session_name))
         return True
@@ -387,15 +398,24 @@ class Nax:
             time.sleep(step)
         return self._holding(zone, source)
 
-    def subscribe(self, stream, session_name, address):
+    def subscribe(self, stream, session_name, address, port=5004):
         """Point a zone's Rx slot at our announced stream.
 
         Over the WebSocket only - the REST equivalent returns 200 and does
         nothing at all.
+
+        Never write StopRequested to a slot, here or anywhere. On 2026-09-08 a
+        stop/clear/start "repair" of one slot made the amplifier LEAVE the
+        multicast group, and the switch's IGMP snooping never honoured its
+        re-join: every slot sat on "Connecting" with no packets, the house was
+        silent for pages, and nothing on the amplifier or the sender brought it
+        back. Only a different group - a genuinely new join - did. A slot is
+        corrected by writing the right values over it, and nothing else.
         """
         self._send({"Device": {"NaxAudio": {"NaxRx": {"NaxRxStreams": {
             stream: {"SessionNameRequested": session_name,
                      "NetworkAddressRequested": address,
+                     "PortRequested": int(port),
                      "StartRequested": True}}}}}})
 
     def close(self):
@@ -473,7 +493,7 @@ class Pool:
 
 def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                   log=print, session_name="", address="", floor=None,
-                  ready=None, pool=None):
+                  ready=None, pool=None, port=5004):
     """Switch zones on one or more amplifiers, play once, put them all back.
 
     `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
@@ -498,6 +518,8 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     conns = {}
     before = {}          # (host, zone) -> the source it had
     volumes = {}         # (host, zone) -> the volume it had, if we raised it
+    taken = {}           # host -> zones actually bound to us
+    contested = {}       # "host:zone" -> times its route was taken back mid-clip
     refused = []
     try:
         for host, zones in targets.items():
@@ -538,7 +560,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     # page still goes ahead everywhere else, because one
                     # awkward room should not silence the whole house.
                     try:
-                        if nax.ensure_rx(zone, session_name, address):
+                        if nax.ensure_rx(zone, session_name, address, port):
                             log(f"[nax] {host} {zone}: receive slot pointed at "
                                 f"{session_name!r}")
                     except NaxError as e:
@@ -580,6 +602,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                 else:
                     log(f"[nax] {host} {zone}: {source} bound after {n} "
                         f"write(s), was {before[(host, zone)]!r}")
+                    taken.setdefault(host, []).append(zone)
         if len(before) > len(refused) or not refused:
             # Everything the caller needs to answer with is already known here:
             # which zones were taken, what each will go back to, which were
@@ -601,7 +624,37 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     })
                 except Exception as e:
                     log(f"[nax] ready callback raised, continuing: {e}")
-            play()
+            # Hold the routes while the clip plays. The watch in route_all only
+            # proves a route survived its first settle; with the amplifier's
+            # auto-route on, a zone's own streaming player can take it back at
+            # any point after that, and the listener sees it within a tenth of
+            # a second. Until now nobody looked, so a page cut off halfway
+            # looked exactly like one that played.
+            halt = threading.Event()
+
+            def hold():
+                while not halt.wait(0.1):
+                    for h, zs in taken.items():
+                        nax = conns.get(h)
+                        for z in zs:
+                            if nax and not nax._holding(z, source):
+                                key = f"{h}:{z}"
+                                contested[key] = contested.get(key, 0) + 1
+                                took = nax.routes.get(z) or "(nothing)"
+                                log(f"[nax] {h} {z}: route taken back by {took!r} "
+                                    f"during the announcement - re-asserting {source}")
+                                try:
+                                    nax.route(z, source)
+                                except Exception as e:
+                                    log(f"[nax] {h} {z}: could not re-assert ({e})")
+
+            guard = threading.Thread(target=hold, daemon=True)
+            guard.start()
+            try:
+                play()
+            finally:
+                halt.set()
+                guard.join(1.0)
     finally:
         # Per amplifier and all at once, for the same reason as above - and
         # this half matters more. Every second here is a second somebody's
@@ -646,6 +699,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     pass
     return {"restored": {f"{h}:{z}": w for (h, z), w in before.items()},
             "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
+            "contested": contested,
             "refused": refused}
 
 

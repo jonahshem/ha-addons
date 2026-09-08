@@ -167,13 +167,18 @@ def build():
 
     # `block=true` with a small `max-bytes` is what paces the feeder: it
     # blocks in push-buffer once about 30 ms is queued, so the thread runs at
+    # multicast-iface / bind-address: without them the multicast egress follows
+    # whatever the host's default route happens to be, which on a box that also
+    # runs VPN and bridge add-ons is not guaranteed to stay end0. The stream has
+    # exactly one correct interface; say so.
     # the speed the sink drains rather than the speed Python can loop.
     desc = (f"appsrc name=feed is-live=true format=time do-timestamp=false "
             f"block=true max-bytes={FRAME_BYTES * 30} "
             f"caps=audio/x-raw,format=S24BE,rate={RATE},channels={CH},layout=interleaved "
             f"! audioconvert ! audioresample "
             f"! rtpL24pay pt={PT} min-ptime=1000000 max-ptime=1000000 mtu=1452 "
-            f"! udpsink host={MCAST} port={PORT} ttl-mc=16 sync=true async=false")
+            f"! udpsink host={MCAST} port={PORT} multicast-iface={IFACE} "
+            f"bind-address={src} ttl-mc=16 sync=true async=false")
     print("[sender] pipeline:", desc, flush=True)
     pipe = Gst.parse_launch(desc)
     pipe.use_clock(clock)
