@@ -104,7 +104,13 @@ class PageRelay:
         parts = urllib.parse.urlsplit(self.url)
         path = (parts.path or "/").rstrip("/") + "/live?zones=" + urllib.parse.quote(",".join(self.zones))
         try:
-            conn = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=10)
+            # The sender answers only after the page has been ROUTED, played and
+            # drained: five zones bind one after another before the first
+            # sound, and the tail runs three seconds past the last byte. Ten
+            # seconds timed out on every five-zone page at 14 Malke - the page
+            # still played, but the bridge logged no result and the sender hit
+            # a broken pipe writing its 200 to a closed socket.
+            conn = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=90)
             conn.putrequest("POST", path)
             conn.putheader("Content-Type", "application/octet-stream")
             conn.putheader("Transfer-Encoding", "chunked")

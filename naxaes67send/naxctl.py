@@ -355,25 +355,43 @@ class Nax:
         up stuck on the announcement input with the log saying "restored" for
         every one of them. An empty route is a route.
         """
-        out = {}
-        for zone, source in wanted.items():
-            out[zone] = None
-            for i in range(attempts):
-                self.route(zone, source)
-                # Wait for it to LAND, rather than for a fixed settle. The
-                # websocket pushes the change, so this is usually about a
-                # tenth of a second; it used to cost a flat 1.5 s whether the
-                # device answered instantly or not.
-                if not self._lands(zone, source, settle):
-                    continue
-                # Then watch it for a full settle, because this is exactly the
-                # moment the device is about to clear it, and the only way to
-                # know it did not is to keep looking. Continuously, not at the
-                # two instants the old code sampled - a route that was cleared
-                # and re-bound in between used to pass.
-                if self._stays(zone, source, settle):
-                    out[zone] = i + 1
-                    break
+        # Pipelined, not batched. The amplifier acts on ONE route write at a
+        # time and silently drops others sent in the same instant - that was
+        # measured, and it is why the old loop did every zone in full before
+        # touching the next: write, land, watch 1.5 s, next zone. Five zones
+        # took eight seconds before a page could make a sound.
+        #
+        # What the amplifier does NOT need is a full watch per zone. A write
+        # can go out the moment the previous one has landed (about a tenth of
+        # a second), and one settle watch at the end covers every zone at
+        # once: the thing being watched for - the device quietly clearing a
+        # route after its first write - shows up within the same 1.5 s for all
+        # of them. Anything cleared is written again and the watch repeats.
+        # Five zones: about two seconds. One zone: exactly what it was.
+        out = {zone: None for zone in wanted}
+        writes = {zone: 0 for zone in wanted}
+        pending = list(wanted)
+        for _ in range(attempts):
+            if not pending:
+                break
+            landed = []
+            for zone in pending:
+                self.route(zone, wanted[zone])
+                writes[zone] += 1
+                if self._lands(zone, wanted[zone], settle):
+                    landed.append(zone)
+            # One watch for everything that landed this round.
+            deadline = time.time() + settle
+            cleared = set()
+            while time.time() < deadline:
+                for zone in landed:
+                    if zone not in cleared and not self._holding(zone, wanted[zone]):
+                        cleared.add(zone)
+                time.sleep(0.05)
+            for zone in landed:
+                if zone not in cleared and self._holding(zone, wanted[zone]):
+                    out[zone] = writes[zone]
+            pending = [z for z in pending if out[z] is None]
         return out
 
     def _lands(self, zone, source, window, step=0.05):
