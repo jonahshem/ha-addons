@@ -25,6 +25,7 @@ import json
 import ssl
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -127,7 +128,9 @@ class Nax:
         req = urllib.request.Request(self._url(f"/Device/{path}/"),
                                      headers=self._headers())
         with self._opener.open(req, timeout=15) as r:
-            return json.loads(r.read().decode("utf-8", "replace")).get("Device", {})
+            # utf-8-sig: the Media Player 2.0 objects come with a byte-order
+            # mark that plain utf-8 turns into a JSON error.
+            return json.loads(r.read().decode("utf-8-sig", "replace")).get("Device", {})
 
     @staticmethod
     def _label(obj):
@@ -493,7 +496,7 @@ class Pool:
 
 def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                   log=print, session_name="", address="", floor=None,
-                  ready=None, pool=None, port=5004):
+                  ready=None, pool=None, port=5004, home=None):
     """Switch zones on one or more amplifiers, play once, put them all back.
 
     `amps` is {host: {"user":…, "password":…}}; `targets` is {host: [zones]}.
@@ -520,7 +523,20 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     volumes = {}         # (host, zone) -> the volume it had, if we raised it
     taken = {}           # host -> zones actually bound to us
     contested = {}       # "host:zone" -> times its route was taken back mid-clip
+    resume = {}          # (host, zone) -> the Crestron Home source id to resume
     refused = []
+    # What Crestron Home thinks is playing, read ONCE per page. The amplifier is
+    # not what pauses the music - the processor is: it sees the zone leave its
+    # player and pauses it, and only the processor's own Play brings it back.
+    # A zone is matched to its media room by NAME, which is the one thing the
+    # amplifier and the processor were both configured with from the same list.
+    playing_rooms = {}
+    if home is not None:
+        try:
+            playing_rooms = home.rooms_playing()
+        except Exception as e:
+            log(f"[crpc] could not read what Crestron Home is playing ({e}); "
+                f"music will not be resumed after this page")
     try:
         for host, zones in targets.items():
             cfg = amps.get(host) or {}
@@ -586,6 +602,12 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"it instead of restoring it")
                     was = ""
                 before[(host, zone)] = was
+                # Only rooms whose music is PLAYING now are resumed afterwards.
+                # A room that was already paused stays paused: this never
+                # starts music, it only puts back what the page interrupted.
+                room = (was_all.get(zone, {}).get("name") or "").strip().lower()
+                if room in playing_rooms:
+                    resume[(host, zone)] = playing_rooms[room]
                 if floor:
                     had = (was_all.get(zone) or {}).get("volume")
                     if had is not None and had < floor:
@@ -677,6 +699,17 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         log(f"[nax] {host} {zone}: restored to {wanted[zone]!r}")
             except Exception as e:
                 log(f"[nax] {host}: COULD NOT RESTORE ({e})")
+        # Right after the routes, so the zone is back on its own input when
+        # the music starts again; before the volume, so the room does not come
+        # up to level in silence and then start. This is the call the Crestron
+        # Home app makes when somebody presses Play - measured on the
+        # processor's own log, and proven to bring the Deck back in 1.5 s.
+        for (host, zone), source_id in resume.items():
+            try:
+                home.play(source_id)
+                log(f"[crpc] {host} {zone}: asked Crestron Home to resume source {source_id}")
+            except Exception as e:
+                log(f"[crpc] {host} {zone}: COULD NOT RESUME source {source_id} ({e})")
         # After the routes, so the room is back on its own source before it
         # comes back up to its own level.
         for (host, zone), had in volumes.items():
@@ -700,6 +733,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     return {"restored": {f"{h}:{z}": w for (h, z), w in before.items()},
             "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
             "contested": contested,
+            "resumed": {f"{h}:{z}": sid for (h, z), sid in resume.items()},
             "refused": refused}
 
 

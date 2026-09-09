@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.5.3"
+version: "0.6.1"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64]
@@ -39,6 +39,11 @@ options:
   # Only ever raises - a room already playing louder is left alone. Set 0 to
   # never touch a volume, and accept that a room left turned down hears nothing.
   announce_volume: 600
+  # The Crestron Home processor. With this set, a room whose music a page
+  # interrupted is told to play again the way the app does it; without it the
+  # room comes back on the right source but paused.
+  crpc_host: ""
+  crpc_pin: "2129918115"
   api_port: 8099
 schema:
   iface: str
@@ -59,4 +64,6 @@ schema:
   lead_seconds: float?
   tail_seconds: float?
   announce_volume: int?
+  crpc_host: str?
+  crpc_pin: str?
   api_port: int

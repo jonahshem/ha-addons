@@ -40,6 +40,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import clips
+import crpcmedia
 import naxctl
 import sender
 
@@ -65,6 +66,7 @@ WAIT_FOR_TURN = 10.0
 # list. See naxctl.Pool: this is what removes the login and websocket handshake
 # from the front of every announcement.
 _pool = naxctl.Pool(log=lambda m: log(m))
+_home = crpcmedia.CrestronHome(CRPC_HOST, CRPC_PIN, log=lambda m: log(m)) if CRPC_HOST else None
 
 MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
@@ -112,6 +114,12 @@ def _floor():
 
 
 ANNOUNCE_VOLUME = _floor()
+
+# The Crestron Home processor, for putting music back after a page. Optional:
+# without it a page still works, but a room that was playing one of the
+# amplifier's own streaming players comes back paused.
+CRPC_HOST = (os.environ.get("CRPC_HOST") or "").strip()
+CRPC_PIN = (os.environ.get("CRPC_PIN") or "2129918115").strip()
 
 
 def log(msg):
@@ -220,6 +228,9 @@ class Handler(BaseHTTPRequestHandler):
                 "lead_seconds": LEAD_SECONDS,
                 "tail_seconds": TAIL_SECONDS,
                 "announce_volume": ANNOUNCE_VOLUME,
+                # Set when a processor is configured: music is resumed after a
+                # page. Empty means rooms come back paused.
+                "crestron_home": CRPC_HOST or None,
                 "amps": sorted(amps),
                 # The single most useful thing to know when a page is silent:
                 # the sender must be running for the route to bind at all.
@@ -502,7 +513,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool, port=RTP_PORT)
+                                     pool=_pool, port=RTP_PORT, home=_home)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] announcement failed: {broke['err']}")
@@ -603,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=ANNOUNCE_VOLUME, ready=info.update,
-                                     pool=_pool, port=RTP_PORT)
+                                     pool=_pool, port=RTP_PORT, home=_home)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] live page failed: {broke['err']}")

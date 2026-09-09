@@ -19,6 +19,8 @@ export API_PORT=$(get api_port); export API_PORT=${API_PORT:-8099}
 export LEAD_SECONDS=$(get lead_seconds)
 export TAIL_SECONDS=$(get tail_seconds)
 export ANNOUNCE_VOLUME=$(get announce_volume)
+export CRPC_HOST=$(get crpc_host)
+export CRPC_PIN=$(get crpc_pin)
 echo "===== NAX AES67 sender $(date) ====="
 echo "iface=$IFACE mcast=$MCAST:$PORT session='$SESSION' api=$API_PORT"
 echo "lead=${LEAD_SECONDS:-1.5}s tail=${TAIL_SECONDS:-3.0}s announce_volume=${ANNOUNCE_VOLUME:-600}"

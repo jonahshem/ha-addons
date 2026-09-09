@@ -14,5 +14,6 @@ COPY sap.py /sap.py
 COPY naxctl.py /naxctl.py
 COPY api.py /api.py
 COPY clips.py /clips.py
+COPY crpcmedia.py /crpcmedia.py
 RUN chmod a+x /run.sh
 CMD ["/run.sh"]
