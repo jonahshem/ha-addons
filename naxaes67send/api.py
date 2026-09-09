@@ -117,6 +117,11 @@ def _floor():
 ANNOUNCE_VOLUME = _floor()
 
 OPTIONS_FILE = os.environ.get("OPTIONS_FILE", "/data/options.json")
+# The Supervisor keeps a saved option set, but rewrites /data/options.json only
+# when the add-on STARTS. A save from the settings page therefore also lands
+# here, and this is read first, so it takes effect on the next page rather than
+# the next restart. Both survive a restart with the same values.
+SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "/data/settings.json")
 SETTINGS_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.html")
 
 
@@ -124,11 +129,14 @@ def settings():
     """Speaker groups and per-zone volumes, read fresh from the add-on's own
     options file each time - the settings page writes them through the
     Supervisor, and a page should honour a save made a second ago."""
-    try:
-        with open(OPTIONS_FILE) as f:
-            o = json.load(f)
-    except Exception:
-        o = {}
+    o = {}
+    for path in (SETTINGS_FILE, OPTIONS_FILE):
+        try:
+            with open(path) as f:
+                o = json.load(f)
+            break
+        except Exception:
+            continue
     percent = o.get("default_percent")
     try:
         percent = int(percent) if percent not in (None, "") else 70
@@ -454,7 +462,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail(f"Supervisor not reachable: {e}")
         if res.get("result") != "ok":
             return self._fail(f"Supervisor said {res}")
-        # The Supervisor rewrites /data/options.json; settings() reads it fresh.
+        try:
+            tmp = SETTINGS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(options, f)
+            os.replace(tmp, SETTINGS_FILE)
+        except OSError as e:
+            log(f"[api] settings accepted by the Supervisor but not written locally ({e}); "
+                f"they apply after a restart")
         log(f"[api] settings saved: {len(options.get('speaker_groups') or [])} group(s), "
             f"{len(options.get('zone_volumes') or [])} zone volume(s)")
         return self._json({"ok": True})
