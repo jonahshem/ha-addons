@@ -530,13 +530,21 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
     # player and pauses it, and only the processor's own Play brings it back.
     # A zone is matched to its media room by NAME, which is the one thing the
     # amplifier and the processor were both configured with from the same list.
+    # Read in a thread while the amplifier session is fetched and the zones
+    # are read, and joined just before the first route write - it has to
+    # describe the house BEFORE the page touches anything, and on a warm
+    # session it takes about a second, which the amplifier setup now hides.
     playing_rooms = {}
+    reader = None
     if home is not None:
-        try:
-            playing_rooms = home.rooms_playing()
-        except Exception as e:
-            log(f"[crpc] could not read what Crestron Home is playing ({e}); "
-                f"music will not be resumed after this page")
+        def read_home():
+            try:
+                playing_rooms.update(home.rooms_playing())
+            except Exception as e:
+                log(f"[crpc] could not read what Crestron Home is playing ({e}); "
+                    f"music will not be resumed after this page")
+        reader = threading.Thread(target=read_home, daemon=True, name="crpc-read")
+        reader.start()
     try:
         for host, zones in targets.items():
             cfg = amps.get(host) or {}
@@ -602,12 +610,6 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"it instead of restoring it")
                     was = ""
                 before[(host, zone)] = was
-                # Only rooms whose music is PLAYING now are resumed afterwards.
-                # A room that was already paused stays paused: this never
-                # starts music, it only puts back what the page interrupted.
-                room = (was_all.get(zone, {}).get("name") or "").strip().lower()
-                if room in playing_rooms:
-                    resume[(host, zone)] = playing_rooms[room]
                 if floor:
                     had = (was_all.get(zone) or {}).get("volume")
                     if had is not None and had < floor:
@@ -616,6 +618,18 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         log(f"[nax] {host} {zone}: volume {had} -> {floor} "
                             f"for the announcement")
                 taking.append(zone)
+            # The processor's answer is needed from here on - and must predate
+            # the first route write, which is the next line.
+            if reader is not None:
+                reader.join(8.0)
+                reader = None
+            for zone in taking:
+                # Only rooms whose music is PLAYING now are resumed afterwards.
+                # A room that was already paused stays paused: this never
+                # starts music, it only puts back what the page interrupted.
+                room = (was_all.get(zone, {}).get("name") or "").strip().lower()
+                if room in playing_rooms:
+                    resume[(host, zone)] = playing_rooms[room]
             # All of this amplifier's zones together - see `route_all`.
             for zone, n in nax.route_all({z: source for z in taking}).items():
                 if n is None:

@@ -90,6 +90,25 @@ class CrestronHome:
         self._id = 1000
         self._last_hb = 0.0
         self._lock = threading.Lock()
+        # Registering costs about six seconds (the handshake, then two large
+        # replies on a cold connection). Paid at startup and kept warm with the
+        # processor's own heartbeat, so a page never pays it: the first page
+        # after a restart started its audio 9.5 s in instead of 2.5 s.
+        threading.Thread(target=self._keep_warm, daemon=True, name="crpc-warm").start()
+
+    def _keep_warm(self):
+        while True:
+            try:
+                with self._lock:
+                    if self._ss is None:
+                        self._connect()
+                    self._pump(0.2)          # sends the heartbeat when it is due
+            except Exception as e:
+                self.close()
+                self.log(f"[crpc] session to {self.host} dropped ({type(e).__name__}); retrying in 10s")
+                time.sleep(10)
+                continue
+            time.sleep(1.0)
 
     @staticmethod
     def _identity(path):
