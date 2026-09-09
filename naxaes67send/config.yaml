@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.6.5"
+version: "0.7.0"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64]
@@ -13,6 +13,7 @@ startup: application
 # So HomeUI can reach the control API through Home Assistant rather than
 # needing a port open on the house LAN.
 ingress: true
+hassio_api: true
 ingress_port: 8099
 panel_icon: mdi:bullhorn
 options:
@@ -44,6 +45,12 @@ options:
   # room comes back on the right source but paused.
   crpc_host: ""
   crpc_pin: "2129918115"
+  # Speakers and levels. Edited from the add-on's own page (Open Web UI) which
+  # lists the amplifier's zones and the processor's page groups; kept here so
+  # they survive and can be read. Percent as Crestron Home shows it.
+  default_percent: 70
+  zone_volumes: []
+  speaker_groups: []
   api_port: 8099
 schema:
   iface: str
@@ -66,4 +73,13 @@ schema:
   announce_volume: int?
   crpc_host: str?
   crpc_pin: str?
+  default_percent: int?
+  zone_volumes:
+    - zone: str
+      percent: int
+  speaker_groups:
+    - name: str
+      zones:
+        - str
+      page_group: str?
   api_port: int

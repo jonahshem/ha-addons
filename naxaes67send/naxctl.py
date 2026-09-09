@@ -628,12 +628,15 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"it instead of restoring it")
                     was = ""
                 before[(host, zone)] = was
-                if floor:
+                # `floor` is one level for every zone, or {"host:zone": level}
+                # with a "*" default - the settings page sets one per room.
+                level = floor.get(f"{host}:{zone}", floor.get("*")) if isinstance(floor, dict) else floor
+                if level:
                     had = (was_all.get(zone) or {}).get("volume")
-                    if had is not None and had < floor:
+                    if had is not None and had < level:
                         volumes[(host, zone)] = had
-                        nax.set_volume(zone, floor)
-                        log(f"[nax] {host} {zone}: volume {had} -> {floor} "
+                        nax.set_volume(zone, level)
+                        log(f"[nax] {host} {zone}: volume {had} -> {level} "
                             f"for the announcement")
                 taking.append(zone)
             # The processor's answer is needed from here on - and must predate

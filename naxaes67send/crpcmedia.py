@@ -95,6 +95,14 @@ class CrestronHome:
         # replies (200 KB together, about a second warm) in front of the audio.
         self._sub, self._sub_rev, self._sub_at = None, 0, 0.0      # rooms + names
         self._state, self._state_rev, self._state_at = None, 0, 0.0  # room/source states
+        # Intercom: the page groups the installer defined (names, member
+        # rooms) and the page that is happening right now, from the processor's
+        # own events - so a relayed page can be sent to the speakers that
+        # belong to the group somebody actually pressed.
+        self._groups, self._groups_rev, self._groups_at = None, 0, 0.0
+        self._roomnames, self._roomnames_at = {}, 0.0
+        self._subscribed = False
+        self.active_page = None      # {"groups": [ids], "rooms": [ids], "from": id, "at": t, "state": s}
         # Registering costs about six seconds (the handshake, then two large
         # replies on a cold connection). Paid at startup and kept warm with the
         # processor's own heartbeat, so a page never pays it: the first page
@@ -117,6 +125,30 @@ class CrestronHome:
                     if self._ss is None:
                         self._connect()
                     now = time.time()
+                    if not self._subscribed:
+                        try:
+                            self._call("IRpcIntercom.RequestPageableRoomGroupsChangedEvents",
+                                       {"minimumTime": 500}, wait=5)
+                        except Exception:
+                            pass
+                        self._subscribed = True
+                    if now - self._groups_at > 60:
+                        try:
+                            g = self._call("IRpcIntercom.GetPageableRoomGroups",
+                                           {"intercomRevStamp": self._groups_rev})
+                            if g:
+                                self._groups, self._groups_rev = g, g.get("IntercomRevStamp") or 0
+                        except Exception:
+                            pass
+                        self._groups_at = now
+                    if now - self._roomnames_at > 300:
+                        try:
+                            r = self._call("IRpcHouse.GetAllRooms", {"roomListRevstamp": 0})
+                            if r:
+                                self._roomnames = {x["Id"]: x.get("RoomName") for x in r.get("Rooms", [])}
+                        except Exception:
+                            pass
+                        self._roomnames_at = now
                     if now - self._sub_at > 60:
                         sub = self._call("IRpcMedia.GetSubsystem", {"systemRevstamp": self._sub_rev})
                         if sub:
@@ -156,6 +188,7 @@ class CrestronHome:
 
     # -- session -----------------------------------------------------------
     def _connect(self):
+        self._subscribed = False
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -197,11 +230,66 @@ class CrestronHome:
                     self._text += body[1:].decode("utf-8", "replace")
             objs, self._text = _objects(self._text)
             for d in objs:
-                if "id" in d:
+                if d.get("method") == "IRpcIntercom.Event":
+                    self._intercom_event(d.get("params") or {})
+                if "id" in d and "method" not in d:
                     self._replies[d["id"]] = d
             if time.time() - self._last_hb > HEARTBEAT_SECS:
                 self._ss.sendall(HEARTBEAT)
                 self._last_hb = time.time()
+
+    def _intercom_event(self, p):
+        """A page starting or ending, as the processor announces it.
+
+        Shape measured from a real TSW-770R page (RavaBridge log, 2026-09-08):
+        PageableRoomGroupStates[].PageableRoomStates[] with CallState
+        (CallInitializing / CallStarting / ... / None), CallType "Paging",
+        CallFromRoomId, CallWithPageableRoomGroupIds, and
+        CallWithAdditionalPageableRoomIds. The group ids are what we want.
+        """
+        states = ((p.get("parameters") or {}).get("PageableRoomGroupStates") or {}).get("PageableRoomGroupStates") or []
+        live = None
+        for g in states:
+            for r in g.get("PageableRoomStates") or []:
+                st = r.get("CallState") or "None"
+                if st != "None" and (r.get("CallType") in (None, "Paging", "None")):
+                    live = {"groups": list(r.get("CallWithPageableRoomGroupIds") or []),
+                            "rooms": list(r.get("CallWithAdditionalPageableRoomIds") or []),
+                            "from": r.get("CallFromRoomId"), "state": st, "at": time.time()}
+        if live and (live["groups"] or live["rooms"]):
+            self.active_page = live
+            self.log(f"[crpc] page {live['state']}: groups {live['groups']} rooms {live['rooms']} from room {live['from']}")
+        elif live is None and self.active_page and time.time() - self.active_page["at"] > 2:
+            # Every room back to CallState None: the page is over. Keep the
+            # last one around briefly - the audio arrives a moment after the
+            # processor says the call started, and can outlive its end.
+            self.active_page = dict(self.active_page, state="None", ended=time.time())
+
+    def page_groups(self):
+        """[{id, name, type, rooms: [names]}] as the installer defined them."""
+        g = self._groups
+        if not g:
+            g = self.call("IRpcIntercom.GetPageableRoomGroups", {"intercomRevStamp": 0})
+            self._groups = g
+        if not self._roomnames:
+            r = self.call("IRpcHouse.GetAllRooms", {"roomListRevstamp": 0})
+            self._roomnames = {x["Id"]: x.get("RoomName") for x in (r or {}).get("Rooms", [])}
+        out = []
+        for grp in (g or {}).get("PageableRoomGroups") or []:
+            out.append({"id": grp.get("Id"), "name": grp.get("Name") or str(grp.get("Id")),
+                        "type": grp.get("PageableRoomGroupType"),
+                        "rooms": [self._roomnames.get(r.get("RoomId"), str(r.get("RoomId")))
+                                  for r in grp.get("PageableRooms") or []]})
+        return out
+
+    def current_page_group_names(self, max_age=45.0):
+        """Names of the page groups a page in progress (or one that ended in
+        the last few seconds) was sent to. Empty if nobody is paging."""
+        ap = self.active_page
+        if not ap or time.time() - ap["at"] > max_age:
+            return []
+        names = {grp["id"]: grp["name"] for grp in self.page_groups()}
+        return [names.get(i, str(i)) for i in ap.get("groups") or []]
 
     def _call(self, method, params, wait=12.0):
         i = self._next()

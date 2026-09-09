@@ -1,0 +1,112 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Announcements - speakers</title>
+<style>
+  :root{--ink:#1d2430;--mute:#6b7380;--line:#dfe3e8;--bg:#f6f7f9;--card:#fff;--accent:#1f5f8b;--ok:#2e7d4f;--bad:#b3261e}
+  body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+  main{max-width:900px;margin:0 auto;padding:1.2rem 1.4rem 3rem}
+  h1{font-size:1.25rem;margin:.2rem 0 .2rem} h2{font-size:1rem;margin:1.6rem 0 .5rem}
+  p.lead{color:var(--mute);margin:0 0 1rem}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.9rem 1rem;margin:.6rem 0}
+  table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{font-weight:600;color:var(--mute);font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
+  input[type=number]{width:4.2rem;padding:.25rem .35rem;border:1px solid var(--line);border-radius:.3rem;font:inherit}
+  input[type=text],select{padding:.3rem .4rem;border:1px solid var(--line);border-radius:.3rem;font:inherit;min-width:12rem}
+  button{font:inherit;padding:.4rem .8rem;border:1px solid var(--accent);border-radius:.35rem;background:var(--accent);color:#fff;cursor:pointer}
+  button.quiet{background:#fff;color:var(--accent)} button.danger{background:#fff;color:var(--bad);border-color:var(--bad)}
+  .zones{display:flex;flex-wrap:wrap;gap:.35rem .9rem;margin:.4rem 0} .zones label{white-space:nowrap}
+  .row{display:flex;gap:.8rem;align-items:center;flex-wrap:wrap;margin:.3rem 0}
+  .muted{color:var(--mute)} .ok{color:var(--ok)} .bad{color:var(--bad)}
+  #status{margin:.8rem 0;min-height:1.4em}
+  code{background:#eef1f4;padding:0 .3rem;border-radius:.25rem}
+</style>
+<main>
+  <h1>Announcements &amp; paging - speakers</h1>
+  <p class="lead">Which speakers a page reaches, and how loud. Zones come from the amplifier; page groups come from the Crestron Home processor. Saved settings take effect on the next page, no restart needed.</p>
+
+  <h2>Zone volume for announcements and pages</h2>
+  <div class="card">
+    <p class="muted" style="margin-top:0">A room quieter than this is turned up to it for the duration, then put back. A room already louder is left alone. Percent, as Crestron Home shows it.</p>
+    <table id="volumes"><thead><tr><th>Zone</th><th>Room</th><th>Now</th><th>Announce at</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <h2>Speaker groups</h2>
+  <p class="muted">Each group is a set of zones. Tie a group to a Crestron Home page group and a page to that group plays on exactly those speakers. The group named the same as a page group is used automatically.</p>
+  <div id="groups"></div>
+  <div class="row"><button class="quiet" id="add">Add a group</button></div>
+
+  <h2>Page groups on the processor</h2>
+  <div class="card" id="pagegroups"><span class="muted">reading...</span></div>
+
+  <div class="row" style="margin-top:1.4rem"><button id="save">Save</button><span id="status"></span></div>
+</main>
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || document.cookie.replace(/(?:(?:^|.*;\s*)naxtoken\s*=\s*([^;]*).*$)|^.*$/, "$1") || "";
+const base = location.pathname.replace(/\/ui\/?$/, "");
+const H = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
+let cfg = null, zones = {}, pagegroups = [];
+
+async function api(path, opts) {
+  const r = await fetch(base + path, Object.assign({headers: Object.assign({"Content-Type": "application/json"}, H)}, opts || {}));
+  const t = await r.text();
+  try { return JSON.parse(t); } catch (e) { throw new Error(r.status + " " + t.slice(0, 120)); }
+}
+function status(msg, cls) { const s = document.getElementById("status"); s.textContent = msg; s.className = cls || ""; }
+function zoneName(id) { const z = zones[id]; return z ? (z.name || id) : id; }
+
+function renderVolumes() {
+  const tb = document.querySelector("#volumes tbody"); tb.innerHTML = "";
+  const vol = Object.fromEntries((cfg.zone_volumes || []).map(v => [v.zone, v.percent]));
+  for (const id of Object.keys(zones).sort()) {
+    const z = zones[id];
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><code>${id}</code></td><td>${z.name || ""}</td><td class="muted">${z.volume == null ? "" : Math.round(z.volume / 10) + "%"}</td>
+      <td><input type="number" min="0" max="100" step="5" data-zone="${id}" value="${vol[id] != null ? vol[id] : cfg.default_percent}"> %</td>`;
+    tb.appendChild(tr);
+  }
+}
+function groupCard(g, i) {
+  const d = document.createElement("div"); d.className = "card"; d.dataset.i = i;
+  const pgOpts = ['<option value="">(not tied to a page group)</option>'].concat(pagegroups.map(p => `<option value="${p.name}" ${g.page_group === p.name ? "selected" : ""}>${p.name}</option>`)).join("");
+  d.innerHTML = `<div class="row"><label>Name <input type="text" class="gname" value="${g.name || ""}"></label>
+      <label>Plays for page group <select class="gpage">${pgOpts}</select></label>
+      <button class="danger gdel">Remove</button></div>
+    <div class="zones">${Object.keys(zones).sort().map(id => `<label><input type="checkbox" class="gzone" value="${id}" ${(g.zones || []).includes(id) ? "checked" : ""}> ${zoneName(id)}</label>`).join("")}</div>`;
+  d.querySelector(".gdel").onclick = () => { cfg.speaker_groups.splice(i, 1); renderGroups(); };
+  return d;
+}
+function renderGroups() {
+  const box = document.getElementById("groups"); box.innerHTML = "";
+  (cfg.speaker_groups || []).forEach((g, i) => box.appendChild(groupCard(g, i)));
+  if (!(cfg.speaker_groups || []).length) box.innerHTML = '<p class="muted">No groups yet. Without one, a page goes to every zone below.</p>';
+}
+function renderPageGroups() {
+  const box = document.getElementById("pagegroups");
+  if (!pagegroups.length) { box.innerHTML = '<span class="muted">No processor configured, or none answered.</span>'; return; }
+  box.innerHTML = "<table><thead><tr><th>Page group</th><th>Rooms with panels</th><th>Speakers it will use</th></tr></thead><tbody>" +
+    pagegroups.map(p => {
+      const g = (cfg.speaker_groups || []).find(s => s.page_group === p.name) || (cfg.speaker_groups || []).find(s => (s.name || "").toLowerCase() === p.name.toLowerCase());
+      return `<tr><td>${p.name}<div class="muted" style="font-size:.8rem">${p.type || ""}</div></td><td>${(p.rooms || []).join(", ")}</td><td>${g ? g.zones.map(zoneName).join(", ") : '<span class="muted">every zone</span>'}</td></tr>`;
+    }).join("") + "</tbody></table>";
+}
+function collect() {
+  cfg.zone_volumes = Array.from(document.querySelectorAll("#volumes input[data-zone]")).map(i => ({zone: i.dataset.zone, percent: Math.max(0, Math.min(100, parseInt(i.value || cfg.default_percent, 10)))}));
+  cfg.speaker_groups = Array.from(document.querySelectorAll("#groups .card")).map(c => ({
+    name: c.querySelector(".gname").value.trim(), page_group: c.querySelector(".gpage").value,
+    zones: Array.from(c.querySelectorAll(".gzone:checked")).map(i => i.value)})).filter(g => g.name && g.zones.length);
+}
+document.getElementById("add").onclick = () => { cfg.speaker_groups = cfg.speaker_groups || []; cfg.speaker_groups.push({name: "", zones: [], page_group: ""}); renderGroups(); };
+document.getElementById("save").onclick = async () => {
+  collect(); status("saving...");
+  try { const r = await api("/config", {method: "POST", body: JSON.stringify({zone_volumes: cfg.zone_volumes, speaker_groups: cfg.speaker_groups})});
+    if (r.ok) { status("Saved. In effect from the next page.", "ok"); renderPageGroups(); } else status("Not saved: " + (r.error || "unknown"), "bad"); }
+  catch (e) { status("Not saved: " + e.message, "bad"); }
+};
+(async () => {
+  try {
+    const r = await api("/config"); cfg = r.config; zones = r.zones || {}; pagegroups = r.page_groups || [];
+    cfg.default_percent = cfg.default_percent || 70;
+    renderVolumes(); renderGroups(); renderPageGroups();
+  } catch (e) { status("Could not load settings: " + e.message, "bad"); }
+})();
+</script>

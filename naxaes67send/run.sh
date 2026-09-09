@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/with-contenv bash
 # Add-on options arrive as a JSON file; turn the ones we need into env.
 CONF=/data/options.json
 get() { python3 -c "import json,sys;print(json.load(open('$CONF')).get('$1','') or '')" 2>/dev/null; }

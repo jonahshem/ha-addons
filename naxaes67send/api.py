@@ -36,7 +36,9 @@ import queue
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import clips
@@ -113,6 +115,87 @@ def _floor():
 
 
 ANNOUNCE_VOLUME = _floor()
+
+OPTIONS_FILE = os.environ.get("OPTIONS_FILE", "/data/options.json")
+SETTINGS_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.html")
+
+
+def settings():
+    """Speaker groups and per-zone volumes, read fresh from the add-on's own
+    options file each time - the settings page writes them through the
+    Supervisor, and a page should honour a save made a second ago."""
+    try:
+        with open(OPTIONS_FILE) as f:
+            o = json.load(f)
+    except Exception:
+        o = {}
+    percent = o.get("default_percent")
+    try:
+        percent = int(percent) if percent not in (None, "") else 70
+    except ValueError:
+        percent = 70
+    vols = {}
+    for v in o.get("zone_volumes") or []:
+        try:
+            vols[str(v.get("zone"))] = max(0, min(100, int(v.get("percent"))))
+        except (TypeError, ValueError):
+            continue
+    groups = []
+    for g in o.get("speaker_groups") or []:
+        zones = [str(z) for z in (g.get("zones") or []) if z]
+        if g.get("name") and zones:
+            groups.append({"name": str(g["name"]), "zones": zones, "page_group": str(g.get("page_group") or "")})
+    return {"default_percent": percent, "zone_volumes": vols, "speaker_groups": groups}
+
+
+def floors():
+    """{host:zone: level 0-900, "*": default}. Percent as Crestron Home shows
+    it, times ten - measured: the Deck at 41% reads 410 on the amplifier."""
+    st = settings()
+    out = {"*": st["default_percent"] * 10}
+    for z, pct in st["zone_volumes"].items():
+        out[z] = pct * 10
+    return out
+
+
+def resolve_zones(spec, amps, home):
+    """Turn the caller's `zones` into real zones.
+
+    "auto"         the speaker group tied to the page group somebody is paging
+                   right now (or named like it); else every zone.
+    "group:NAME"   that speaker group.
+    anything else  the comma-separated list it always was.
+    """
+    st = settings()
+    spec = (spec or "").strip()
+    chosen, why = None, ""
+    if spec.lower() == "auto":
+        names = []
+        if home is not None:
+            try:
+                names = home.current_page_group_names()
+            except Exception as e:
+                log(f"[crpc] could not tell which page group is active ({e})")
+        for n in names:
+            g = next((g for g in st["speaker_groups"] if g["page_group"].lower() == n.lower()), None) \
+                or next((g for g in st["speaker_groups"] if g["name"].lower() == n.lower()), None)
+            if g:
+                chosen, why = g["zones"], f"page group {n!r} -> speaker group {g['name']!r}"
+                break
+        if chosen is None:
+            why = f"page group {names or 'unknown'}: no speaker group tied to it, using every zone"
+    elif spec.lower().startswith("group:"):
+        name = spec[6:].strip()
+        g = next((g for g in st["speaker_groups"] if g["name"].lower() == name.lower()), None)
+        if g:
+            chosen, why = g["zones"], f"speaker group {g['name']!r}"
+        else:
+            why = f"no speaker group named {name!r}, using every zone"
+    else:
+        return [z.strip() for z in spec.split(",") if z.strip()], ""
+    if chosen is None:
+        chosen = [f"{h}:{z}" for h in amps for z in ("Zone%d" % i for i in range(1, 9))]
+    return chosen, why
 
 # The Crestron Home processor, for putting music back after a page. Optional:
 # without it a page still works, but a room that was playing one of the
@@ -239,6 +322,40 @@ class Handler(BaseHTTPRequestHandler):
                 "note": "the stream carries silence until an announcement is sent",
             })
 
+        if tail == "/ui":
+            try:
+                with open(SETTINGS_HTML, "rb") as f:
+                    body = f.read()
+            except OSError:
+                return self._json({"error": "settings page missing"}, 500)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if tail == "/config":
+            st = settings()
+            zones = {}
+            for host, cfg in amps.items():
+                try:
+                    nax = _pool.get(host, cfg)
+                    for zone, info in nax.zones().items():
+                        zones[f"{host}:{zone}"] = {"name": info.get("name"), "volume": info.get("volume")}
+                except Exception as e:
+                    log(f"[api] config: {host} not answering ({e})")
+            groups = []
+            if _home is not None:
+                try:
+                    groups = _home.page_groups()
+                except Exception as e:
+                    log(f"[api] config: processor not answering ({e})")
+            return self._json({"ok": True, "config": {
+                "default_percent": st["default_percent"],
+                "zone_volumes": [{"zone": z, "percent": p} for z, p in st["zone_volumes"].items()],
+                "speaker_groups": st["speaker_groups"]},
+                "zones": zones, "page_groups": groups,
+                "active_page": (_home.active_page if _home is not None else None)})
         if tail == "/zones":
             if not amps:
                 return self._fail("No amplifier configured")
@@ -291,6 +408,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._repair()
         if tail == "/announce":
             return self._announce()
+        if tail == "/config":
+            return self._save_config()
         if tail == "/live":
             return self._live()
         if tail == "/clips":
@@ -300,6 +419,45 @@ class Handler(BaseHTTPRequestHandler):
         if tail == "/clipfacing":
             return self._clip_facing()
         return self._json({"error": "Not found"}, 404)
+
+    def _save_config(self):
+        try:
+            want = json.loads(self._body(MAX_BODY) or b"{}")
+        except ValueError:
+            return self._json({"error": "Bad request"}, 400)
+        token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
+        if not token:
+            return self._fail("No Supervisor token - the add-on needs hassio_api and a with-contenv run.sh")
+        try:
+            with open(OPTIONS_FILE) as f:
+                options = json.load(f)
+        except Exception as e:
+            return self._fail(f"Could not read the current options: {e}")
+        if "zone_volumes" in want:
+            options["zone_volumes"] = [{"zone": str(v.get("zone")), "percent": int(v.get("percent"))}
+                                       for v in want["zone_volumes"] if v.get("zone") is not None]
+        if "speaker_groups" in want:
+            options["speaker_groups"] = [{"name": str(g.get("name")), "zones": [str(z) for z in g.get("zones") or []],
+                                          "page_group": str(g.get("page_group") or "")}
+                                         for g in want["speaker_groups"] if g.get("name")]
+        if "default_percent" in want:
+            options["default_percent"] = int(want["default_percent"])
+        req = urllib.request.Request("http://supervisor/addons/self/options", method="POST",
+                                     data=json.dumps({"options": options}).encode(),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                res = json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            return self._fail(f"Supervisor refused the options: {e.code} {e.read()[:200].decode('utf-8', 'replace')}")
+        except Exception as e:
+            return self._fail(f"Supervisor not reachable: {e}")
+        if res.get("result") != "ok":
+            return self._fail(f"Supervisor said {res}")
+        # The Supervisor rewrites /data/options.json; settings() reads it fresh.
+        log(f"[api] settings saved: {len(options.get('speaker_groups') or [])} group(s), "
+            f"{len(options.get('zone_volumes') or [])} zone volume(s)")
+        return self._json({"ok": True})
 
     def _body(self, cap):
         try:
@@ -380,7 +538,10 @@ class Handler(BaseHTTPRequestHandler):
 
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         targets, unknown = {}, []
-        for ref in (q.get("zones", [""])[0] or "").split(","):
+        refs, why = resolve_zones(q.get("zones", [""])[0], amps, _home)
+        if why:
+            log(f"[api] zones: {why}")
+        for ref in refs:
             if not ref.strip():
                 continue
             host, zone = split_zone(ref)
@@ -514,7 +675,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
-                                     floor=ANNOUNCE_VOLUME, ready=info.update,
+                                     floor=floors(), ready=info.update,
                                      pool=_pool, port=RTP_PORT, home=_home)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
@@ -574,7 +735,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail("No amplifier configured")
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         targets, unknown = {}, []
-        for ref in (q.get("zones", [""])[0] or "").split(","):
+        refs, why = resolve_zones(q.get("zones", [""])[0], amps, _home)
+        if why:
+            log(f"[api] zones: {why}")
+        for ref in refs:
             if not ref.strip():
                 continue
             host, zone = split_zone(ref)
@@ -618,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
-                                     floor=ANNOUNCE_VOLUME, ready=info.update,
+                                     floor=floors(), ready=info.update,
                                      pool=_pool, port=RTP_PORT, home=_home)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
