@@ -90,6 +90,11 @@ class CrestronHome:
         self._id = 1000
         self._last_hb = 0.0
         self._lock = threading.Lock()
+        # The live view of what is playing, kept by the warm thread. A page
+        # reads this instantly; asking the processor at page time put its two
+        # replies (200 KB together, about a second warm) in front of the audio.
+        self._sub, self._sub_rev, self._sub_at = None, 0, 0.0      # rooms + names
+        self._state, self._state_rev, self._state_at = None, 0, 0.0  # room/source states
         # Registering costs about six seconds (the handshake, then two large
         # replies on a cold connection). Paid at startup and kept warm with the
         # processor's own heartbeat, so a page never pays it: the first page
@@ -97,18 +102,38 @@ class CrestronHome:
         threading.Thread(target=self._keep_warm, daemon=True, name="crpc-warm").start()
 
     def _keep_warm(self):
+        """Hold the session, and keep the media snapshot current.
+
+        Both reads take a revstamp and answer null when nothing has changed
+        since it - measured at 0.5 s for the null, against 0.6 s for a full
+        121 KB state - so polling the state every two seconds costs the
+        processor almost nothing, and the snapshot is never more than a couple
+        of seconds behind the house. The room list changes when an installer
+        does something, so it is refreshed every minute.
+        """
         while True:
             try:
                 with self._lock:
                     if self._ss is None:
                         self._connect()
+                    now = time.time()
+                    if now - self._sub_at > 60:
+                        sub = self._call("IRpcMedia.GetSubsystem", {"systemRevstamp": self._sub_rev})
+                        if sub:
+                            self._sub, self._sub_rev = sub, sub.get("SystemRevstamp") or 0
+                        self._sub_at = now
+                    if now - self._state_at > 2:
+                        st = self._call("IRpcMedia.GetSubsystemState", {"stateRevstamp": self._state_rev})
+                        if st:
+                            self._state, self._state_rev = st, st.get("StateRevstamp") or 0
+                        self._state_at = now
                     self._pump(0.2)          # sends the heartbeat when it is due
             except Exception as e:
                 self.close()
                 self.log(f"[crpc] session to {self.host} dropped ({type(e).__name__}); retrying in 10s")
                 time.sleep(10)
                 continue
-            time.sleep(1.0)
+            time.sleep(0.5)
 
     @staticmethod
     def _identity(path):
@@ -221,8 +246,13 @@ class CrestronHome:
         installer called "Deck" on the amplifier is the media room called
         "Deck" in Crestron Home, because both came off the same room list.
         """
-        sub = self.call("IRpcMedia.GetSubsystem", {"systemRevstamp": 0})
-        st = self.call("IRpcMedia.GetSubsystemState", {"stateRevstamp": 0})
+        # The snapshot, if the warm thread has one that is recent; otherwise a
+        # live read - the first page after a restart, or a processor that has
+        # been unreachable.
+        sub, st = self._sub, self._state
+        if not sub or not st or time.time() - self._state_at > 15:
+            sub = self.call("IRpcMedia.GetSubsystem", {"systemRevstamp": 0})
+            st = self.call("IRpcMedia.GetSubsystemState", {"stateRevstamp": 0})
         names = {r["Id"]: (r.get("Name") or "").strip() for r in sub.get("Rooms", [])}
         playing = {s["Id"] for s in st.get("SourceStates", [])
                    if "Playing" in (s.get("PlayerState") or [])}

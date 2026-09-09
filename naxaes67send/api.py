@@ -548,6 +548,9 @@ class Handler(BaseHTTPRequestHandler):
             # that is inaudible in one room looks identical to a working one
             # without this.
             "raised": info.get("raised") or {},
+            # Rooms whose music Crestron Home was asked to put back after the
+            # restore, and the source id it was asked to play.
+            "resumed": info.get("resumed") or {},
             "took": round(time.time() - started, 1),
         })
 
@@ -649,6 +652,9 @@ class Handler(BaseHTTPRequestHandler):
             "bytes": total,
             "restored": info.get("restored") or {},
             "raised": info.get("raised") or {},
+            # Rooms whose music Crestron Home was asked to put back after the
+            # restore, and the source id it was asked to play.
+            "resumed": info.get("resumed") or {},
             "took": round(time.time() - started, 1),
         })
 

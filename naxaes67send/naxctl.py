@@ -651,6 +651,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         "restored": {f"{h}:{z}": w for (h, z), w in before.items()},
                         "raised": {f"{h}:{z}": v for (h, z), v in volumes.items()},
                         "refused": list(refused),
+                        "resumed": {f"{h}:{z}": sid for (h, z), sid in resume.items()},
                         # When the LAST zone bound. Its lead has been running
                         # ever since - the caller should wait out whatever is
                         # left of it, not start a fresh one.
