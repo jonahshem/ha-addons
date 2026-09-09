@@ -66,7 +66,6 @@ WAIT_FOR_TURN = 10.0
 # list. See naxctl.Pool: this is what removes the login and websocket handshake
 # from the front of every announcement.
 _pool = naxctl.Pool(log=lambda m: log(m))
-_home = crpcmedia.CrestronHome(CRPC_HOST, CRPC_PIN, log=lambda m: log(m)) if CRPC_HOST else None
 
 MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
@@ -120,6 +119,9 @@ ANNOUNCE_VOLUME = _floor()
 # amplifier's own streaming players comes back paused.
 CRPC_HOST = (os.environ.get("CRPC_HOST") or "").strip()
 CRPC_PIN = (os.environ.get("CRPC_PIN") or "2129918115").strip()
+# Built here, AFTER its settings exist - 0.6.1 built it next to the pool,
+# forty lines above them, and the add-on died on import.
+_home = crpcmedia.CrestronHome(CRPC_HOST, CRPC_PIN, log=lambda m: log(m)) if CRPC_HOST else None
 
 
 def log(msg):
