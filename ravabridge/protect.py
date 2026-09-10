@@ -48,6 +48,32 @@ def _ssl_context():
     return ctx
 
 
+class _TokenBucket:
+    """The console allows 10 requests a second and answers 429 past that, which
+    reads exactly like a missing endpoint. Run at 8/s for headroom, shared by
+    every caller in the process because the limit is per console."""
+
+    def __init__(self, rate=8.0, burst=8.0):
+        self._rate, self._burst = rate, burst
+        self._tokens, self._at = burst, time.monotonic()
+        self._lock = threading.Lock()
+
+    def take(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._burst, self._tokens + (now - self._at) * self._rate)
+                self._at = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+_BUCKET = _TokenBucket()
+
+
 class ProtectClient:
     """Talks to one UniFi Protect console's Integration API."""
 
@@ -72,6 +98,7 @@ class ProtectClient:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        _BUCKET.take()
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:
                 return resp.status, resp.read(), resp.headers.get("Content-Type", "")
@@ -101,6 +128,11 @@ class ProtectClient:
         if not isinstance(data, list):
             raise ProtectError("GET /v1/cameras did not return a list")
         return data
+
+    def camera(self, camera_id):
+        """One camera in full. Only this form carries `featureFlags` (what it can
+        detect, whether it has a speaker); the list does not."""
+        return self._json("GET", "/v1/cameras/%s" % urllib.parse.quote(camera_id)) or {}
 
     def rtsps_streams(self, camera_id):
         data = self._json("GET", "/v1/cameras/%s/rtsps-stream" % urllib.parse.quote(camera_id))

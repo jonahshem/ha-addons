@@ -135,33 +135,38 @@ POST /discover          find panels and doors now
 POST /ring?door=NAME    ring the door's panels with no media - proves the addressing
 POST /hangup            end every call
 POST /unlock?door=NAME  open that door through UniFi Access
-GET  /protect           the Protect doorbells, camera bindings, whether ffmpeg is present
-POST /protectring?door=NAME   place a Protect doorbell's call now, as if it were pressed
+GET  /protect           every Protect camera: type, call, triggers, what it offers, ffmpeg present
+POST /protectring?camera=NAME place that camera's call now, as if it had triggered
 ```
 
-## UniFi Protect doorbells (a camera, not a SIP device)
+## UniFi Protect cameras (the doorbell is a camera, not a SIP device)
 
-A UniFi Protect doorbell speaks no SIP, so the bridge stands in for one. It
-holds Protect's events socket open, and on a press it places a loopback SIP call
-into this same bridge - so every panel rings with the doorbell's picture and
-two-way audio, and the panel side is the code that was already there.
+A Protect doorbell speaks no SIP, so the bridge stands in for one. Give it the
+console and an Integration API key and **every camera is found and listed**,
+like Access door discovery. A doorbell is on by default and calls the panels on
+**ring**. Any other camera can be switched on too, with its trigger picked from
+what Protect offers for that camera: `motion`, a smart detection (`person`,
+`vehicle`, `animal`, `package`, `licensePlate`, `face`), a line crossing
+(`line`, or `line:person`), loitering (`loiter`), or an audio alarm
+(`alrmSmoke`, `alrmBark`, ...). What each camera offers is written into its
+`available` list on the Configuration page.
 
 ```
-press (events WS)  ->  INVITE 127.0.0.1:5060  ->  bridge rings the panels
-doorbell RTSP      ->  ffmpeg  ->  H.264 (copied) + G.711 (from AAC)  ->  panels
-panel voice        ->  bridge  ->  G.711  ->  ffmpeg  ->  Opus  ->  talkback
+press / detection (events WS)  ->  INVITE 127.0.0.1:5060  ->  bridge rings the panels
+camera RTSP                    ->  ffmpeg  ->  H.264 (copied) + G.711 (from AAC)  ->  panels
+panel voice                    ->  bridge  ->  G.711  ->  ffmpeg  ->  Opus  ->  camera speaker
 ```
 
 Video is copied through untouched; only audio is transcoded, which is why this
 add-on carries **ffmpeg**. The picture starts on the panels while they are still
-ringing (early media). Talking back goes out the doorbell's own speaker through
-Protect's `talkback-session`.
+ringing. Talkback goes out the camera's own speaker when it has one (a doorbell
+does; most cameras do not, and `talkback` defaults accordingly).
 
-Configure `protect.host` (the console IP), `protect.api_key` (Protect app ->
-Settings -> Control Plane -> Integrations), and one `doorbells[]` entry per bell:
-`camera_name` (or `camera_id`), `ring[]` like a door, `quality` (default `high`),
-`talkback` (default on). Test it without pressing anything:
-`POST /protectring?door=Front%20Door`.
+Set `protect.host` (the console IP) and `protect.api_key` (Protect app ->
+Settings -> Control Plane -> Integrations), restart, and open the Configuration
+page: each camera is there with `call`, `triggers`, `ring`, `talkback` to edit.
+A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s. Test
+any camera without a press: `POST /protectring?camera=Front%20Door`.
 
 ## Options
 
@@ -177,7 +182,7 @@ Settings -> Control Plane -> Integrations), and one `doorbells[]` entry per bell
 | `log_sip` | print every SIP message. The switch to flip when a door will not ring |
 | `talk` | UniFi Talk third-party device credentials |
 | `access` | UniFi Access console, developer API token and door id, for `/unlock` |
-| `protect` | UniFi Protect doorbells: `host`, `api_key`, `doorbells[]` (`name`, `camera_name`/`camera_id`, `ring[]`, `quality`, `talkback`). Needs ffmpeg (in the image) |
+| `protect` | UniFi Protect: `host`, `api_key`, `autodetect`, `ring[]`, `cameras[]` (`name`, `camera_id`, `call`, `triggers[]`, `ring[]`, `talkback`, `quality`; `type`/`available` filled in). Needs ffmpeg (in the image) |
 | `api_token`, `api_port` | the LAN lock on the API, default the dealer PIN |
 
 ## Testing without a house

@@ -137,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/protect":
             pd = getattr(BRIDGE, "protect", None)
-            self._json(pd.public() if pd else {"error": "no Protect doorbells configured"})
+            self._json(pd.public() if pd else {"error": "no Protect console configured"})
             return
         self._json({"error": "not found"}, 404)
 
@@ -171,13 +171,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/protectring":         # one path segment: _tail() keeps only the last
             pd = getattr(BRIDGE, "protect", None)
             if not pd or not pd.enabled:
-                self._json({"error": "no Protect doorbells configured"}, 400)
+                self._json({"error": "no Protect console configured"}, 400)
                 return
-            which = (q.get("door") or q.get("name") or [""])[0]
-            if not which and pd.doorbells:
-                which = pd.doorbells[0]["name"]
+            which = (q.get("camera") or q.get("door") or q.get("name") or [""])[0]
+            if not which and pd.cameras:
+                which = next((e["name"] for e in pd.cameras if e["call"]), pd.cameras[0]["name"])
             ok = pd.ring_now(which)
-            self._json({"ringing": which} if ok else {"error": f"no Protect doorbell called {which!r}"},
+            self._json({"ringing": which} if ok else {"error": f"no Protect camera called {which!r}"},
                        200 if ok else 404)
             return
         self._json({"error": "not found"}, 404)
