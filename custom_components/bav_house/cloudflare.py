@@ -70,13 +70,26 @@ class Cloudflare:
     # -- tunnel ----------------------------------------------------------
 
     async def find_tunnel(self, name: str) -> dict | None:
+        """The tunnel called `name`, matched exactly first, then ignoring case.
+
+        🔴 The fleet's tunnels are named by hand and the case is not
+        consistent - `14Malke`, `714Dow`, `882vancourt`, `110roosevelt`. A
+        derived name is lowercase, so an exact-only match would look at
+        `14Malke`, decide the house has no tunnel, and make a SECOND one. Two
+        tunnels for one house is a mess that is only noticed when the wrong one
+        is healthy.
+        """
         payload = await self._call(
             "GET",
-            f"/accounts/{self._account}/cfd_tunnel"
-            f"?name={_q(name)}&is_deleted=false",
+            f"/accounts/{self._account}/cfd_tunnel?is_deleted=false&per_page=1000",
         )
-        for tunnel in payload.get("result") or []:
+        tunnels = payload.get("result") or []
+        for tunnel in tunnels:
             if tunnel.get("name") == name:
+                return tunnel
+        folded = name.casefold()
+        for tunnel in tunnels:
+            if (tunnel.get("name") or "").casefold() == folded:
                 return tunnel
         return None
 
@@ -110,19 +123,43 @@ class Cloudflare:
             raise CloudflareError("no connector token returned for the tunnel")
         return token
 
-    async def set_ingress(self, tunnel_id: str, hostname: str) -> None:
-        """Route `hostname` at Home Assistant, and everything else at a 404.
+    async def get_ingress(self, tunnel_id: str) -> list[dict]:
+        payload = await self._call(
+            "GET", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations")
+        config = (payload.get("result") or {}).get("config") or {}
+        rules = config.get("ingress")
+        return list(rules) if isinstance(rules, list) else []
 
-        The catch-all is required: a tunnel configuration whose last rule names
-        a hostname is rejected.
+    async def set_ingress(self, tunnel_id: str, hostname: str) -> str:
+        """Route `hostname` at Home Assistant, leaving every other rule alone.
+
+        🔴 A tunnel's configuration is written WHOLE - there is no per-rule
+        API - so any rule not sent back is deleted. Real house tunnels carry
+        several: a second Home Assistant port, a UniFi console, a processor's
+        log page, an SSH route. Replacing the list with just ours would destroy
+        them silently, and the tunnel would still report healthy.
+
+        So: keep every existing hostname rule that is not ours, in its original
+        order, add or replace ours, and end with the catch-all the API requires
+        (preserving whatever the catch-all already was - it is not always a
+        404).
         """
+        existing = await self.get_ingress(tunnel_id)
+        kept, catch_all = [], {"service": "http_status:404"}
+        for rule in existing:
+            if not rule.get("hostname"):
+                # A rule with no hostname is the catch-all; keep its service.
+                catch_all = dict(rule)
+                continue
+            if rule.get("hostname") != hostname:
+                kept.append(rule)
+        ours = {"hostname": hostname, "service": HA_SERVICE, "originRequest": {}}
+        rules = [*kept, ours, catch_all]
         await self._call(
             "PUT", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations",
-            {"config": {"ingress": [
-                {"hostname": hostname, "service": HA_SERVICE, "originRequest": {}},
-                {"service": "http_status:404"},
-            ]}},
+            {"config": {"ingress": rules}},
         )
+        return f"{len(kept)} other route(s) kept"
 
     # -- dns -------------------------------------------------------------
 

@@ -218,7 +218,8 @@ async def _cloudflare(hass: HomeAssistant, cfg: dict,
     tunnel_id, token = await cf.ensure_tunnel(name)
     progress.say(STEP_CLOUDFLARE, "ok", f"tunnel {name} ({tunnel_id[:8]}…)")
     if hostname:
-        await cf.set_ingress(tunnel_id, hostname)
+        kept = await cf.set_ingress(tunnel_id, hostname)
+        progress.say(STEP_CLOUDFLARE, "ok", f"{hostname} routed, {kept}")
         zone = cfg.get(CONF_CF_ZONE) or hostname.split(".", 1)[-1]
         what = await cf.ensure_cname(zone, hostname, tunnel_id)
         progress.say(STEP_CLOUDFLARE, "ok", f"{hostname} -> tunnel ({what})")
