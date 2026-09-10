@@ -1,0 +1,35 @@
+name: BAV House Setup
+version: "1.0.0"
+slug: bavsetup
+description: Puts the house-commissioning integration on this box and starts it - install this first on a new house
+# amd64 as well as aarch64: houses run Raspberry Pis, but a generic x86 box and
+# a VM are how this gets tested before it reaches one.
+arch: [aarch64, amd64]
+init: false
+# Writing custom_components is the entire job.
+map: [homeassistant_config:rw]
+# Adding the store repository and restarting Core both go through the Supervisor.
+hassio_api: true
+hassio_role: manager
+boot: manual
+startup: services
+ingress: true
+ingress_port: 8097
+panel_icon: mdi:home-plus-outline
+options:
+  # Add `bav_house:` to configuration.yaml so the integration loads on every
+  # boot and offers to commission a house that has not been commissioned. Turn
+  # off to leave configuration.yaml alone and add the integration by hand from
+  # Settings > Devices & services.
+  start_on_boot: true
+  # Restart Home Assistant once the files are in place. A custom integration is
+  # imported at start and no other way, so without this nothing happens until
+  # the next restart anyway.
+  restart_after: true
+  # Run on start rather than waiting for the button. This add-on exists to be
+  # installed and forgotten, so the default is to do the job and be done.
+  run_on_start: true
+schema:
+  start_on_boot: bool
+  restart_after: bool
+  run_on_start: bool

@@ -1,0 +1,6 @@
+provision:
+  name: Commission this house
+  description: >-
+    Run commissioning again. Every step is idempotent, so this is the thing to
+    do after fixing a wrong credential or a network problem - what already
+    succeeded is skipped, what failed is retried.

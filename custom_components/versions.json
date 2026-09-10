@@ -1,0 +1,50 @@
+{
+  "generated": "2026-09-10T16:21:25Z",
+  "base": "https://raw.githubusercontent.com/jonahshem/ha-addons/main/custom_components",
+  "integrations": {
+    "crestron_home": {
+      "version": "1.1.0",
+      "files": [
+        "__init__.py",
+        "alarm_control_panel.py",
+        "api.py",
+        "binary_sensor.py",
+        "button.py",
+        "climate.py",
+        "config_flow.py",
+        "const.py",
+        "cover.py",
+        "helpers.py",
+        "icon.png",
+        "light.py",
+        "lock.py",
+        "logo.png",
+        "manifest.json",
+        "media_player.py",
+        "pdu_api.py",
+        "scene.py",
+        "switch.py"
+      ]
+    },
+    "bav_house": {
+      "version": "1.0.0",
+      "files": [
+        "README.md",
+        "__init__.py",
+        "cloudflare.py",
+        "config_flow.py",
+        "const.py",
+        "entity.py",
+        "manifest.json",
+        "payload.py",
+        "provision.py",
+        "sensor.py",
+        "services.yaml",
+        "strings.json",
+        "supervisor.py",
+        "translations/en.json",
+        "update.py"
+      ]
+    }
+  }
+}

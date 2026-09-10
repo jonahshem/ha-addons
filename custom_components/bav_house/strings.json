@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Which house is this?",
+        "description": "The name is what this house is called everywhere else. The address is left blank to use the site name under {zone}.",
+        "data": {
+          "site_name": "Site name",
+          "hostname": "Public address (optional)",
+          "device_pin": "Crestron device PIN"
+        },
+        "data_description": {
+          "site_name": "For example, 14 Malke Drive.",
+          "hostname": "Leave blank and it is worked out from the site name.",
+          "device_pin": "The common PIN Crestron Home set on this house's devices. Used for the amplifiers, the touch panels and the add-on APIs."
+        }
+      },
+      "crestron": {
+        "title": "The Crestron Home processor",
+        "description": "The processor is checked before this form is accepted. Tick Skip if this house has no processor, or it is not on the network yet.",
+        "data": {
+          "crestron_host": "Processor address",
+          "crestron_token": "REST API token",
+          "skip": "Skip - set Crestron Home up later"
+        },
+        "data_description": {
+          "crestron_host": "For example, 192.168.0.50.",
+          "crestron_token": "From the processor's web interface, under Installer Settings."
+        }
+      },
+      "cloudflare": {
+        "title": "Remote access",
+        "description": "A tunnel called this is created in Cloudflare, pointed at Home Assistant, and {hostname} is made to resolve to it. Nobody has to open a browser to authorise it.\n\nFleet Cloudflare account on this box: {account}",
+        "data": {
+          "cf_tunnel_name": "Tunnel name",
+          "change_cloudflare": "Change the Cloudflare account"
+        },
+        "data_description": {
+          "cf_tunnel_name": "Must be unique across the Cloudflare account. The site name is the usual choice."
+        }
+      },
+      "cloudflare_account": {
+        "title": "Cloudflare account",
+        "description": "The API token needs Cloudflare Tunnel edit on the account and DNS edit on the zone. Leave the token blank to set this house up without remote access.",
+        "data": {
+          "cf_api_token": "API token",
+          "cf_account_id": "Account ID",
+          "cf_zone": "Zone"
+        },
+        "data_description": {
+          "cf_zone": "The domain the address lives under, for example bav.homes."
+        }
+      },
+      "addons": {
+        "title": "What to install",
+        "description": "Each one is installed, configured for this house from what you have already entered, and started. Installing builds the add-on on this box, which on a Raspberry Pi takes a few minutes each.",
+        "data": {
+          "addons": "Add-ons"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nothing answered at that address. Check the processor is on the network and reachable from Home Assistant.",
+      "invalid_auth": "The processor answered but refused that token.",
+      "cloudflare_auth": "Cloudflare refused those credentials, or the token cannot see that account.",
+      "bad_site_name": "That site name has no letters or digits in it."
+    },
+    "abort": {
+      "single_instance_allowed": "This box is already set up as a house. Use the integration's Configure button to change what is installed, or the bav_house.provision action to run commissioning again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "What to install",
+        "description": "Changing this does not install anything on its own - run the bav_house.provision action afterwards.",
+        "data": {
+          "addons": "Add-ons"
+        }
+      }
+    }
+  },
+  "services": {
+    "provision": {
+      "name": "Commission this house",
+      "description": "Run commissioning again. Steps that already succeeded are skipped."
+    }
+  }
+}
