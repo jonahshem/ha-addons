@@ -27,7 +27,7 @@ an ordinary update in **Settings > Updates**.
 
 | Integration | Version | Files |
 |---|---|---|
-| `bav_house` | 1.0.0 | 15 |
+| `bav_house` | 1.0.1 | 15 |
 | `crestron_home` | 1.1.0 | 19 |
 
 Source of truth is the private `crestron_home` monorepo; this repository is
