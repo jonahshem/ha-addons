@@ -49,6 +49,12 @@ import sip
 AUDIO_ENCODERS = {sip.G722: ("g722", 16000), sip.PCMU: ("pcm_mulaw", 8000),
                   sip.PCMA: ("pcm_alaw", 8000)}
 
+# A Protect doorbell has no speaker-volume setting - not in its object, not in
+# what the API will PATCH (`micVolume` there is its microphone, and it is already
+# at 100). The only volume control anybody has over it is the level of the audio
+# sent to its talkback session, so this is it.
+DEFAULT_TALKBACK_GAIN_DB = 12
+
 
 def _free_udp_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -445,12 +451,25 @@ class ProtectCall:
         os.write(fd, sdp.encode("ascii"))
         os.close(fd)
         self._sdp_tmp = path
+        gain = self.bell.get("talkback_gain")
+        gain = DEFAULT_TALKBACK_GAIN_DB if gain is None else float(gain)
+        filters = []
+        if gain:
+            # Boost, then limit. A doorbell speaker is small and far away, so the
+            # raw level off a panel's microphone arrives thin; a plain boost with
+            # nothing after it would clip the peaks into distortion instead.
+            filters.append(f"volume={gain}dB")
+            if self.mgr.has_limiter:
+                filters.append("alimiter=limit=0.95")
         cmd = [self.mgr.ffmpeg, "-hide_banner", "-loglevel", "warning",
-               "-protocol_whitelist", "file,udp,rtp", "-i", path,
-               "-c:a", enc, "-ar", str(rate), "-ac", "1", "-payload_type", str(pt),
-               "-f", "rtp", url]
+               "-protocol_whitelist", "file,udp,rtp", "-i", path]
+        if filters:
+            cmd += ["-af", ",".join(filters)]
+        cmd += ["-c:a", enc, "-ar", str(rate), "-ac", "1", "-payload_type", str(pt),
+                "-f", "rtp", url]
         self.ffup = self._spawn(cmd, "ffmpeg-up")
-        self.log(f"protect: {self.bell['name']} talkback -> {url} ({codec}/{rate})")
+        self.log(f"protect: {self.bell['name']} talkback -> {url} ({codec}/{rate}"
+                 + (f", +{gain} dB)" if gain else ")"))
 
     def _spawn(self, cmd, tag):
         try:
@@ -569,6 +588,9 @@ class ProtectDoors:
         self.ring_seconds = int(pc.get("ring_seconds") or bridge.ring_seconds or 60)
         self.max_call_seconds = int(pc.get("max_call_seconds") or 3600)
         self.ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        # Whether this build has the limiter the talkback gain wants. Checked once,
+        # because finding out during a call means a call with no talkback at all.
+        self.has_limiter = False
         self.cameras = []
         for c in pc.get("cameras") or []:
             if isinstance(c, dict):
@@ -610,6 +632,7 @@ class ProtectDoors:
             "enable_rtsp": bool(c.get("enable_rtsp", True)),
             "cooldown": c.get("cooldown_seconds"),
             "pause_face": c.get("pause_face", True),
+            "talkback_gain": c.get("talkback_gain"),
             "type": str(c.get("type") or ""),
             "available": [str(a) for a in (c.get("available") or [])],
         }
@@ -647,6 +670,7 @@ class ProtectDoors:
         if not self.enabled:
             return
         self.client = protect.ProtectClient(self.host, self.api_key)
+        self._check_filters()
         self._restore_faces()
         cams, details = [], {}
         try:
@@ -756,6 +780,17 @@ class ProtectDoors:
             except Exception as e:
                 self.log(f"protect: face watchdog: {e!r}")
 
+    def _check_filters(self):
+        try:
+            out = subprocess.run([self.ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
+        except Exception as e:
+            self.log(f"protect: could not ask ffmpeg for its filters: {e!r}")
+            return
+        self.has_limiter = " alimiter " in out
+        if not self.has_limiter:
+            self.log("protect: this ffmpeg has no alimiter - talkback gain will boost without a limiter")
+
     def _autodetect(self, cams):
         for cam in cams:
             if self._known(cam.get("id"), cam.get("name")):
@@ -790,6 +825,8 @@ class ProtectDoors:
                 e["talkback"] = bool(ff.get("hasSpeaker")) if ff else bell
             if e["cooldown"] is None:
                 e["cooldown"] = 3 if "ring" in e["triggers"] else 60
+            if e["talkback_gain"] is None:
+                e["talkback_gain"] = DEFAULT_TALKBACK_GAIN_DB
             if e["camera_id"]:
                 self._by_camera[e["camera_id"]] = e
 
@@ -827,14 +864,14 @@ class ProtectDoors:
                 row = {"name": e["name"], "camera_id": e["camera_id"], "camera_name": e["camera_name"],
                        "call": bool(e["call"]), "triggers": list(e["triggers"]), "ring": list(e["ring"]),
                        "talkback": bool(e["talkback"]), "quality": e["quality"],
-                       "pause_face": bool(e["pause_face"])}
+                       "pause_face": bool(e["pause_face"]), "talkback_gain": e["talkback_gain"]}
                 existing.append(row)
                 changed = True
             if overwrite:
                 # A save from the page IS the operator speaking; take it verbatim.
                 row.update(call=bool(e["call"]), triggers=list(e["triggers"]), ring=list(e["ring"]),
                            talkback=bool(e["talkback"]), quality=e["quality"],
-                           pause_face=bool(e["pause_face"]))
+                           pause_face=bool(e["pause_face"]), talkback_gain=e["talkback_gain"])
                 changed = True
             # Informational, refreshed each start; the operator's own fields are left alone.
             for k in ("type", "available"):
@@ -971,6 +1008,11 @@ class ProtectDoors:
                 e["talkback"] = bool(r["talkback"])
             if "pause_face" in r:
                 e["pause_face"] = bool(r["pause_face"])
+            if "talkback_gain" in r:
+                try:
+                    e["talkback_gain"] = max(0.0, min(30.0, float(r["talkback_gain"])))
+                except (TypeError, ValueError):
+                    pass
             if r.get("quality") in ("low", "medium", "high"):
                 e["quality"] = r["quality"]
             if e["call"] and not e["triggers"]:
@@ -1104,6 +1146,7 @@ class ProtectDoors:
                              "call": bool(e["call"]), "triggers": e["triggers"], "available": e["available"],
                              "ring": e["ring"], "talkback": bool(e["talkback"]), "quality": e["quality"],
                              "pause_face": bool(e["pause_face"]),
+                             "talkback_gain": e["talkback_gain"],
                              "has_face": "face" in (e["available"] or [])} for e in self.cameras],
                 "active": self._active.state if self._active else None,
                 "debug": self.debug}

@@ -187,6 +187,15 @@ has answered, the doorbell's encoder starts on whichever it chose, which is
 also why the audio starts at answer while the picture starts while ringing -
 until somebody answers there is nowhere to send a visitor's voice anyway.
 
+**Turning a doorbell up.** A Protect doorbell has no speaker-volume setting -
+not on the camera object, not in what the API will `PATCH` (the `micVolume`
+there is its microphone, and Ubiquiti ships it at 100). The only volume control
+anybody has over it is the level of the audio sent to its talkback session, so
+each camera carries a **gain in dB**, default 12, on the page next to Talkback.
+It is a boost followed by a limiter: a doorbell speaker is small and the visitor
+is standing back from it, so raw gain alone would clip the peaks into
+distortion. Raise it until it carries; 0 turns the filter off entirely.
+
 **A doorbell stops reading faces while you are talking to it.** Left alone it
 goes on recognising the visitor for the whole conversation, granting or denying
 access over and over, because Protect has no idea a call is happening. So `face`
