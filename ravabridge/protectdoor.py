@@ -61,9 +61,17 @@ def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None):
         outs += ["-map", "0:v:0", "-c:v", "copy", "-an", "-payload_type", "96",
                  "-f", "rtp", f"rtp://{video[0]}:{video[1]}?pkt_size=1200{ttl}"]
     if audio:
+        # 172 bytes caps the payload at 160 samples: G.711 at 20 ms, the ptime the
+        # panels are offered. Left to itself the RTP muxer sent ~64 ms per packet -
+        # the right number of bytes a second, in packets no SIP phone expects.
         outs += ["-map", "0:a:0", "-vn", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
-                 "-payload_type", "0", "-f", "rtp", f"rtp://{audio[0]}:{audio[1]}"]
+                 "-payload_type", "0", "-f", "rtp", f"rtp://{audio[0]}:{audio[1]}?pkt_size=172"]
+    # A doorbell must show a picture NOW. ffmpeg's default is to study the input for
+    # up to five seconds before it emits anything, which measured as 6.4 s to first
+    # video packet - a ringing panel showing nothing. The stream is one H.264 and one
+    # AAC track and needs no studying, so cut the probe right down.
     return [ffmpeg, "-hide_banner", "-loglevel", "warning", "-fflags", "nobuffer",
+            "-analyzeduration", "300000", "-probesize", "100000",
             "-rtsp_transport", "tcp", "-i", rtsp_url] + outs
 
 
