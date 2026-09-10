@@ -8,6 +8,7 @@
     POST /hangup            end every call
     POST /unlock?door=NAME  open that door through UniFi Access (needs `access` + the door's id)
     POST /protectprobe?camera=NAME  pull a Protect camera's media only - proves it flows, rings nothing
+    POST /protectsave       {cameras:[...]} from the page: call, triggers, ring, talkback, quality
 
 Reachable through Home Assistant's ingress, or on the LAN with the bearer
 token. The token defaults to the PIN this dealer already uses, so a fresh
@@ -46,6 +47,8 @@ button{padding:.35rem .8rem;margin-right:.4rem;border:1px solid #888;border-radi
 <h2>Panels</h2><table id="panels"></table>
 <h2>Doors</h2><table id="doors"></table>
 <h2>Calls</h2><table id="calls"></table>
+<h2>Protect cameras <span id="pmsg" class="muted"></span></h2>
+<div id="protect"><span class="muted">No Protect console configured.</span></div>
 <h2>Reader setup</h2><div id="setup" class="muted">Run Discover with the UniFi Access token set to see what to type into the Access app.</div>
 <h2>Log</h2><pre id="events"></pre>
 <script>
@@ -62,7 +65,59 @@ async function load(){
 }
 async function act(p){document.getElementById('msg').textContent='…';const r=await fetch(p,{method:'POST'});let t;try{t=await r.json()}catch(e){t={status:r.status}}
   document.getElementById('msg').textContent=JSON.stringify(t).slice(0,240);load();}
-load(); setInterval(load,4000);
+
+const TRIG_HELP={ring:'the doorbell button',motion:'any motion',line:'crossing a line',loiter:'loitering'};
+let PCAMS=null;
+async function loadProtect(){
+  const r=await fetch('protect',{cache:'no-store'}); if(!r.ok)return;
+  const d=await r.json(); const el=document.getElementById('protect');
+  if(!d.enabled){el.innerHTML='<span class="muted">No Protect console configured. Set <b>protect.host</b> and <b>protect.api_key</b> in the add-on Configuration tab.</span>';return;}
+  if(PCAMS)return;                       // do not clobber edits in progress
+  PCAMS=d.cameras;
+  const row=c=>{
+    const opts=(c.available||[]).map(t=>`<option value="${esc(t)}"${(c.triggers||[]).includes(t)?' selected':''}>${esc(t)}${TRIG_HELP[t]?' — '+TRIG_HELP[t]:''}</option>`).join('');
+    const q=['low','medium','high'].map(v=>`<option value="${v}"${c.quality===v?' selected':''}>${v}</option>`).join('');
+    return `<tr data-id="${esc(c.camera_id)}">
+      <td><b>${esc(c.name)}</b><br><span class="muted">${esc(c.type||'')}</span></td>
+      <td><input type="checkbox" class="c-call"${c.call?' checked':''}></td>
+      <td><select class="c-trig" multiple size="4" style="min-width:13rem">${opts}</select></td>
+      <td><input class="c-ring" value="${esc((c.ring||[]).join(', '))}" size="12"></td>
+      <td><input type="checkbox" class="c-talk"${c.talkback?' checked':''}></td>
+      <td><select class="c-q">${q}</select></td>
+      <td><button onclick="probe(this,'${esc(c.name)}')">Test media</button>
+          <button onclick="ringCam('${esc(c.name)}')" title="This RINGS every panel">Ring…</button></td></tr>`;
+  };
+  el.innerHTML='<table><tr><th>Camera</th><th>Call</th><th>Triggers (ctrl-click for more)</th><th>Rings</th><th>Talkback</th><th>Quality</th><th></th></tr>'
+    +d.cameras.map(row).join('')+'</table>'
+    +'<div style="margin-top:.5rem"><button onclick="saveProtect()">Save cameras</button> '
+    +'<span class="muted">“Test media” pulls the picture and sound only — it rings nothing. “Ring…” places a real call to the panels.</span></div>';
+}
+function saveProtect(){
+  const rows=[...document.querySelectorAll('#protect tr[data-id]')].map(tr=>({
+    camera_id:tr.dataset.id,
+    call:tr.querySelector('.c-call').checked,
+    triggers:[...tr.querySelector('.c-trig').selectedOptions].map(o=>o.value),
+    ring:tr.querySelector('.c-ring').value.split(',').map(x=>x.trim()).filter(Boolean),
+    talkback:tr.querySelector('.c-talk').checked,
+    quality:tr.querySelector('.c-q').value}));
+  document.getElementById('pmsg').textContent='saving…';
+  fetch('protectsave',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cameras:rows})})
+    .then(r=>r.json()).then(t=>{document.getElementById('pmsg').textContent=t.error?('error: '+t.error):('saved '+t.saved+' camera(s)'+(t.persisted?'':' (in memory only)'));PCAMS=null;loadProtect();});
+}
+function probe(btn,name){
+  const was=btn.textContent; btn.textContent='…'; btn.disabled=true;
+  fetch('protectprobe?seconds=8&camera='+encodeURIComponent(name),{method:'POST'}).then(r=>r.json()).then(d=>{
+    btn.textContent=was; btn.disabled=false;
+    document.getElementById('pmsg').textContent = d.error ? (name+': '+d.error)
+      : `${name}: picture ${d.video.startedAfter}s ${d.video.perSecond}/s, sound ${d.audio.startedAfter}s ${d.audio.perSecond}/s${d.audioSteady?'':' (audio not steady)'} — nothing rang`;
+  });
+}
+function ringCam(name){
+  if(!confirm('This RINGS every panel in '+name+"'s list. Continue?"))return;
+  fetch('protectring?camera='+encodeURIComponent(name),{method:'POST'}).then(r=>r.json())
+    .then(t=>{document.getElementById('pmsg').textContent=JSON.stringify(t).slice(0,200);});
+}
+load(); setInterval(load,4000); loadProtect(); setInterval(loadProtect,15000);
 </script>
 """
 
@@ -101,6 +156,13 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         q = parse_qs(urlparse(self.path).query)
         return auth == f"Bearer {token}" or (q.get("token") or [""])[0] == token
+
+    def _body(self, cap=1 << 20):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        return self.rfile.read(min(n, cap)) if n > 0 else b""
 
     def _tail(self):
         path = urlparse(self.path).path.rstrip("/")
@@ -168,6 +230,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/unlock":
             self._json(unlock((q.get("door") or [""])[0]))
+            return
+        if path == "/protectsave":
+            pd = getattr(BRIDGE, "protect", None)
+            if not pd or not pd.enabled:
+                self._json({"error": "no Protect console configured"}, 400)
+                return
+            try:
+                body = json.loads(self._body().decode("utf-8") or "{}")
+            except ValueError as e:
+                self._json({"error": f"that was not JSON: {e}"}, 400)
+                return
+            self._json(pd.save_settings(body.get("cameras") or []))
             return
         if path == "/protectprobe":         # media only: pulls the camera, rings nothing
             pd = getattr(BRIDGE, "protect", None)

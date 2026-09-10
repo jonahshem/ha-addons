@@ -164,8 +164,15 @@ ringing. Talkback goes out the camera's own speaker when it has one (a doorbell
 does; most cameras do not, and `talkback` defaults accordingly).
 
 Set `protect.host` (the console IP) and `protect.api_key` (Protect app ->
-Settings -> Control Plane -> Integrations), restart, and open the Configuration
-page: each camera is there with `call`, `triggers`, `ring`, `talkback` to edit.
+Settings -> Control Plane -> Integrations) on the add-on's Configuration tab,
+restart, then **Open Web UI**: every camera is listed there with a Call
+checkbox, its own trigger list, which panels it rings, talkback and quality.
+Save applies at once and writes back to the options - no restart.
+
+The cameras are deliberately NOT edited on the Configuration tab. Home
+Assistant renders a list of objects as a YAML blob rather than form fields, so
+the controls live on the bridge's own page instead, next to the panels and
+doors they act on.
 A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s.
 
 **Stream quality matters more than it looks.** Measured on the G6 Entry with

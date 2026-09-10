@@ -602,7 +602,7 @@ class ProtectDoors:
                 "name": e["name"], "user": e["user"], "host": "127.0.0.1", "ring": e["ring"]})
         self.bridge.registrar.users = {u: d.password for u, d in self.bridge.doors.items()}
 
-    def _persist(self):
+    def _persist(self, overwrite=False):
         """Write the camera list back into the add-on options (Supervisor), so the
         Configuration page shows every camera with `call`/`triggers` ready to edit.
         Adds and fills in; never removes or overrides what a person typed."""
@@ -611,9 +611,9 @@ class ProtectDoors:
             options, token = discover.supervisor_options()
         except Exception as e:
             self.log(f"protect: cannot read the options to save cameras: {e!r}")
-            return
+            return False
         if options is None or not token:
-            return
+            return False
         pc = options.setdefault("protect", {})
         existing = pc.get("cameras") or []
         by_key = {}
@@ -630,6 +630,11 @@ class ProtectDoors:
                        "talkback": bool(e["talkback"]), "quality": e["quality"]}
                 existing.append(row)
                 changed = True
+            if overwrite:
+                # A save from the page IS the operator speaking; take it verbatim.
+                row.update(call=bool(e["call"]), triggers=list(e["triggers"]), ring=list(e["ring"]),
+                           talkback=bool(e["talkback"]), quality=e["quality"])
+                changed = True
             # Informational, refreshed each start; the operator's own fields are left alone.
             for k in ("type", "available"):
                 if row.get(k) != e[k]:
@@ -643,14 +648,16 @@ class ProtectDoors:
             pc["doorbells"] = []                 # migrated into cameras above
             changed = True
         if not changed:
-            return
+            return True
         try:
             discover.supervisor_write(options, token)
             self.log(f"protect: {len(existing)} camera(s) saved to the options page")
+            return True
         except Exception as e:
             body = getattr(e, "read", lambda: b"")()
             self.log(f"protect: could not save cameras to the options: {e!r} "
                      f"{body[:200].decode('utf-8', 'replace') if body else ''}")
+            return False
 
     # -- events ---------------------------------------------------------------
     def _on_event(self, kind, item):
@@ -736,6 +743,43 @@ class ProtectDoors:
                 self._ring(e, e.get("camera_id"))
                 return True
         return False
+
+    def save_settings(self, rows):
+        """Apply edits from the page: live at once, and saved to the options.
+
+        Live first and saved second, deliberately - a console that will not take
+        the write should still leave the house behaving as the operator just
+        asked, and the answer says which of the two happened.
+        """
+        by_id = {e["camera_id"]: e for e in self.cameras if e["camera_id"]}
+        by_name = {e["name"].lower(): e for e in self.cameras}
+        touched = 0
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            e = by_id.get(str(r.get("camera_id") or "")) or by_name.get(str(r.get("name") or "").lower())
+            if e is None:
+                continue
+            if "call" in r:
+                e["call"] = bool(r["call"])
+            if "triggers" in r:
+                e["triggers"] = [str(t).strip().lower() for t in (r["triggers"] or []) if str(t).strip()]
+            if "ring" in r:
+                e["ring"] = [str(x).strip().lower() for x in (r["ring"] or []) if str(x).strip()] or ["all"]
+            if "talkback" in r:
+                e["talkback"] = bool(r["talkback"])
+            if r.get("quality") in ("low", "medium", "high"):
+                e["quality"] = r["quality"]
+            if e["call"] and not e["triggers"]:
+                e["triggers"] = ["ring"] if "ring" in (e["available"] or []) else ["motion"]
+            e["cooldown"] = 3 if "ring" in e["triggers"] else 60
+            touched += 1
+        self._register_doors()
+        armed = [f"{e['name']} on {','.join(e['triggers'])}" for e in self.cameras if e["call"]]
+        self.log(f"protect: settings saved; calling the panels: {', '.join(armed) if armed else 'none'}")
+        persisted = self._persist(overwrite=True)
+        return {"saved": touched, "persisted": bool(persisted),
+                "calling": armed}
 
     def probe(self, name_or_user, seconds=8, quality=None):
         """Pull a camera's media exactly as a call would, into throwaway sinks.
@@ -850,7 +894,7 @@ class ProtectDoors:
                 "ffmpeg": bool(shutil.which("ffmpeg")),
                 "cameras": [{"name": e["name"], "type": e["type"], "camera_id": e["camera_id"],
                              "call": bool(e["call"]), "triggers": e["triggers"], "available": e["available"],
-                             "ring": e["ring"], "talkback": bool(e["talkback"])} for e in self.cameras],
+                             "ring": e["ring"], "talkback": bool(e["talkback"]), "quality": e["quality"]} for e in self.cameras],
                 "active": self._active.state if self._active else None,
                 "debug": self.debug}
 
