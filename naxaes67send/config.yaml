@@ -1,8 +1,8 @@
 name: NAX AES67 Sender
-version: "0.8.0"
+version: "0.7.1"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
-arch: [aarch64, amd64]
+arch: [aarch64]
 init: false
 host_network: true
 host_pid: true
@@ -17,11 +17,7 @@ hassio_api: true
 ingress_port: 8099
 panel_icon: mdi:bullhorn
 options:
-  # Blank works it out: the interface is the one the kernel already routes the
-  # multicast group out of. Set it only where that is wrong - a box with two
-  # NICs on the house LAN, or one whose default route is a VPN. A name that is
-  # not on the box is reported in the log and worked around, not obeyed.
-  iface: ""
+  iface: end0
   mcast: "239.69.4.4"
   port: 5004
   session: "HA Announce 1"
@@ -57,7 +53,7 @@ options:
   speaker_groups: []
   api_port: 8099
 schema:
-  iface: str?
+  iface: str
   mcast: str
   port: int
   session: str

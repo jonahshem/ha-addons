@@ -6,12 +6,19 @@ Protect events socket, and on a press it places a SIP call INTO our own bridge
 doorbell's picture and two-way audio, and none of the panel-side code changes.
 
     press (events WS) ->  INVITE 127.0.0.1:5060  ->  bridge rings the panels
-    doorbell RTSP     ->  ffmpeg  ->  H.264 + G.711 RTP  ->  bridge -> panels
-    panel voice       ->  bridge  ->  G.711  ->  ffmpeg  ->  Opus -> talkback
+    doorbell RTSP     ->  ffmpeg  ->  H.264 + G.722 RTP  ->  bridge -> panels
+    panel voice       ->  bridge  ->  G.722  ->  ffmpeg  ->  Opus -> talkback
 
-Media is ffmpeg's job, because the panels speak G.711 and H.264 while a Protect
-doorbell speaks AAC over RTSP and wants Opus for talkback - conversions no
-stdlib can do. Video is copied through untouched; only audio is transcoded.
+Media is ffmpeg's job, because a Protect doorbell speaks AAC over RTSP and wants
+Opus for talkback - conversions no stdlib can do. Video is copied through
+untouched; only audio is transcoded. The audio codec is whatever the bridge
+answers with, and the offer leads with G.722: it is 16 kHz, the same rate the
+doorbell records at, where G.711 would halve it to 8 kHz and quantise it to
+eight bits.
+
+While a call is up, `face` is lifted out of the camera's detections and put back
+afterwards - a doorbell otherwise goes on recognising the visitor and granting
+or denying access all the way through the conversation.
 
 The one wrinkle worth naming: the bridge learns where to send the panel's voice
 from the *source* of the doorbell's audio (symmetric RTP), so the downstream
@@ -22,6 +29,7 @@ directly.
 
 Standard library only (ffmpeg is an external process, not an import).
 """
+import json
 import os
 import re
 import shutil
@@ -34,6 +42,12 @@ import time
 import protect
 import rtp
 import sip
+
+# What ffmpeg must encode for each payload type the panels accept. G.722 is the
+# wideband one: 16 kHz, which is exactly what a Protect doorbell's own audio is,
+# so choosing it means nothing is thrown away on the way to the panel.
+AUDIO_ENCODERS = {sip.G722: ("g722", 16000), sip.PCMU: ("pcm_mulaw", 8000),
+                  sip.PCMA: ("pcm_alaw", 8000)}
 
 
 def _free_udp_port():
@@ -49,7 +63,7 @@ def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "protect-door"
 
 
-def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None):
+def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None, audio_pt=0):
     """The ffmpeg that carries a camera: video copied as-is, audio to G.711.
 
     `video` and `audio` are (host, port) - or (host, port, ttl) for a multicast
@@ -61,11 +75,14 @@ def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None):
         outs += ["-map", "0:v:0", "-c:v", "copy", "-an", "-payload_type", "96",
                  "-f", "rtp", f"rtp://{video[0]}:{video[1]}?pkt_size=1200{ttl}"]
     if audio:
-        # 172 bytes caps the payload at 160 samples: G.711 at 20 ms, the ptime the
-        # panels are offered. Left to itself the RTP muxer sent ~64 ms per packet -
-        # the right number of bytes a second, in packets no SIP phone expects.
-        outs += ["-map", "0:a:0", "-vn", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
-                 "-payload_type", "0", "-f", "rtp", f"rtp://{audio[0]}:{audio[1]}?pkt_size=172"]
+        enc, rate = AUDIO_ENCODERS.get(audio_pt, AUDIO_ENCODERS[0])
+        # 172 bytes caps the payload at 20 ms - 160 bytes either way, since G.722
+        # halves its 16 kHz to four bits a sample. Left to itself the RTP muxer
+        # sent ~64 ms per packet: the right bytes a second, in packets no SIP
+        # phone expects.
+        outs += ["-map", "0:a:0", "-vn", "-c:a", enc, "-ar", str(rate), "-ac", "1",
+                 "-payload_type", str(audio_pt), "-f", "rtp",
+                 f"rtp://{audio[0]}:{audio[1]}?pkt_size=172"]
     # A doorbell must show a picture NOW. ffmpeg's default is to study the input for
     # up to five seconds before it emits anything, which measured as 6.4 s to first
     # video packet - a ringing panel showing nothing. The stream is one H.264 and one
@@ -165,6 +182,8 @@ class ProtectCall:
         self.ffup = None
         self.audio = None
         self._sdp_tmp = None
+        self.audio_pt = sip.PCMU        # until the bridge's answer says otherwise
+        self._face_restore = None
         self.state = "new"
 
     # -- SIP UAC over loopback --------------------------------------------
@@ -180,8 +199,12 @@ class ProtectCall:
         lines = [
             "v=0", f"o=protect {int(time.time())} {int(time.time())} IN IP4 {me}",
             "s=ProtectDoor", f"c=IN IP4 {me}", "t=0 0",
-            f"m=audio {audio_port} RTP/AVP 0 101",
-            "a=rtpmap:0 PCMU/8000", "a=rtpmap:101 telephone-event/8000",
+            # G.722 first: 16 kHz, which the panels list first too, and which is
+            # the doorbell's own rate - G.711 would halve it and quantise it to
+            # eight bits, which is what a doorbell sounding "digital" is.
+            f"m=audio {audio_port} RTP/AVP {sip.G722} 0 101",
+            f"a=rtpmap:{sip.G722} G722/8000", "a=rtpmap:0 PCMU/8000",
+            "a=rtpmap:101 telephone-event/8000",
             "a=fmtp:101 0-15", "a=ptime:20", "a=sendrecv",
             f"m=video {video_port} RTP/AVP 96", "a=rtpmap:96 H264/90000",
             f"a=fmtp:96 {fmtp}", "a=sendrecv",
@@ -198,6 +221,7 @@ class ProtectCall:
 
     def _run(self):
         client = self.mgr.client
+        self._pause_face()
         # 1) A PLAY-able RTSP URL for the doorbell (turn RTSP on if it is off).
         rtsp_url, quality = client.stream_url(self.camera_id, self.bell.get("quality", "high"),
                                               enable=self.bell.get("enable_rtsp", True))
@@ -349,13 +373,19 @@ class ProtectCall:
             self.log(f"protect: {self.bell['name']} - the bridge offered no audio port")
             return
         self.audio.bridge_audio = (a.get("address") or self.b.address, a["port"])
+        for pt in a.get("payloads") or []:
+            if pt in AUDIO_ENCODERS:
+                self.audio_pt = pt
+                break
+        self.log(f"protect: {self.bell['name']} audio is {sip.rtpmap_for(self.audio_pt)}")
         video = None
         if v.get("port"):
             # The bridge's c= for video may be `group/ttl`; ffmpeg wants the ttl apart.
             host = v.get("address") or self.b.address
             video = (host.split("/")[0], v["port"], host.split("/")[1] if "/" in host else "")
         cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video,
-                             audio=("127.0.0.1", self.audio.from_ffmpeg_port))
+                             audio=("127.0.0.1", self.audio.from_ffmpeg_port),
+                             audio_pt=self.audio_pt)
         self.ffdown = self._spawn(cmd, "ffmpeg-down")
 
     def _start_talkback(self):
@@ -378,7 +408,8 @@ class ProtectCall:
         in_port = _free_udp_port()
         self.audio.talkback_in = ("127.0.0.1", in_port)
         sdp = ("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=talkback\r\nc=IN IP4 127.0.0.1\r\n"
-               f"t=0 0\r\nm=audio {in_port} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n")
+               f"t=0 0\r\nm=audio {in_port} RTP/AVP {self.audio_pt}\r\n"
+               f"a=rtpmap:{self.audio_pt} {sip.rtpmap_for(self.audio_pt)}\r\n")
         fd, path = tempfile.mkstemp(suffix=".sdp")
         os.write(fd, sdp.encode("ascii"))
         os.close(fd)
@@ -406,8 +437,53 @@ class ProtectCall:
             if line:
                 self.log(f"[{tag}] {line}")
 
+    # -- the doorbell should not be reading faces mid-conversation -----------
+    def _pause_face(self):
+        """Take `face` out of the camera's detections for the length of the call.
+
+        A doorbell goes on recognising whoever is standing there while they are
+        talking to the panel, granting or denying access over and over: it has
+        no idea a conversation is happening. Protect has no "busy", so the
+        detection itself is lifted and put back afterwards.
+
+        What was there is written to /data first, so a crash mid-call still
+        restores it at the next start rather than leaving a camera half-armed.
+        """
+        if not self.bell.get("pause_face", True):
+            return
+        try:
+            cam = self.mgr.client.camera(self.camera_id)
+            types = list((cam.get("smartDetectSettings") or {}).get("objectTypes") or [])
+        except Exception as e:
+            self.log(f"protect: {self.bell['name']} - could not read its detections: {e}")
+            return
+        if "face" not in types:
+            return
+        kept = [t for t in types if t != "face"]
+        self.mgr.remember_face(self.camera_id, types)
+        try:
+            self.mgr.client.patch_camera(self.camera_id, {"smartDetectSettings": {"objectTypes": kept}})
+            self._face_restore = types
+            self.log(f"protect: {self.bell['name']} - face detection paused for the call")
+        except Exception as e:
+            self.mgr.forget_face(self.camera_id)
+            self.log(f"protect: {self.bell['name']} - could not pause face detection: {e}")
+
+    def _resume_face(self):
+        if not self._face_restore:
+            return
+        types, self._face_restore = list(self._face_restore), None
+        try:
+            self.mgr.client.patch_camera(self.camera_id, {"smartDetectSettings": {"objectTypes": types}})
+            self.mgr.forget_face(self.camera_id)
+            self.log(f"protect: {self.bell['name']} - face detection back on")
+        except Exception as e:
+            # Left in /data on purpose: the next start puts it back.
+            self.log(f"protect: {self.bell['name']} - COULD NOT restore face detection: {e}")
+
     def _cleanup(self):
         self.done.set()
+        self._resume_face()
         for p in (self.ffdown, self.ffup):
             if p and p.poll() is None:
                 try:
@@ -453,6 +529,11 @@ class ProtectDoors:
         self.api_key = str(pc.get("api_key") or "").strip()
         self.autodetect = bool(pc.get("autodetect", True))
         self.debug = bool(pc.get("debug"))
+        self._face_file = "/data/protect_face.json" if os.path.isdir("/data") else None
+        self.face_check_seconds = max(5, int(pc.get("face_check_seconds") or 20))
+        # A doorbell conversation is short. Past this, something is wrong and
+        # having face detection back matters more than the call.
+        self.face_max_seconds = max(60, int(pc.get("face_max_seconds") or 300))
         self.default_ring = [str(r).strip().lower() for r in (pc.get("ring") or ["all"]) if str(r).strip()] or ["all"]
         self.ring_seconds = int(pc.get("ring_seconds") or bridge.ring_seconds or 60)
         self.max_call_seconds = int(pc.get("max_call_seconds") or 3600)
@@ -497,6 +578,7 @@ class ProtectDoors:
             "talkback": c.get("talkback"),               # None: decided by the camera having a speaker
             "enable_rtsp": bool(c.get("enable_rtsp", True)),
             "cooldown": c.get("cooldown_seconds"),
+            "pause_face": c.get("pause_face", True),
             "type": str(c.get("type") or ""),
             "available": [str(a) for a in (c.get("available") or [])],
         }
@@ -534,6 +616,7 @@ class ProtectDoors:
         if not self.enabled:
             return
         self.client = protect.ProtectClient(self.host, self.api_key)
+        self._restore_faces()
         cams, details = [], {}
         try:
             cams = self.client.cameras()
@@ -552,10 +635,95 @@ class ProtectDoors:
             self._persist()
         self.events = protect.EventsSocket(self.host, self.api_key, self._on_event, self.log)
         self.events.start()
+        threading.Thread(target=self._face_watchdog, name="protect-face-watchdog",
+                         daemon=True).start()
         calling = [f"{e['name']} on {','.join(e['triggers']) or '-'}" for e in self.cameras if e["call"]]
         self.log(f"protect: {len(self.cameras)} camera(s) on {self.host}; calling the panels: "
                  + (", ".join(calling) if calling else "none yet")
                  + f"; ffmpeg {'found' if shutil.which('ffmpeg') else 'MISSING - audio/video will not flow'}")
+
+    # -- the face-detection record, so a crash cannot leave one paused -------
+    def _read_face(self):
+        if not self._face_file:
+            return {}
+        try:
+            with open(self._face_file, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_face(self, data):
+        if not self._face_file:
+            return
+        try:
+            with open(self._face_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError:
+            pass
+
+    def remember_face(self, camera_id, object_types):
+        d = self._read_face()
+        d[camera_id] = {"objectTypes": list(object_types), "at": time.time()}
+        self._write_face(d)
+
+    @staticmethod
+    def _face_types(rec):
+        """The stored detections. Older records were a bare list."""
+        if isinstance(rec, dict):
+            return list(rec.get("objectTypes") or [])
+        return list(rec or [])
+
+    def forget_face(self, camera_id):
+        d = self._read_face()
+        if d.pop(camera_id, None) is not None:
+            self._write_face(d)
+
+    def _restore_faces(self, why="after an interrupted call"):
+        """Put back any detections that are recorded as paused."""
+        for cam_id, rec in list(self._read_face().items()):
+            types = self._face_types(rec)
+            if not types:
+                self.forget_face(cam_id)
+                continue
+            try:
+                self.client.patch_camera(cam_id, {"smartDetectSettings": {"objectTypes": types}})
+                self.forget_face(cam_id)
+                name = next((e["name"] for e in self.cameras if e["camera_id"] == cam_id), cam_id)
+                self.log(f"protect: face detection restored on {name} {why}")
+            except Exception as e:
+                self.log(f"protect: could not restore detections on {cam_id}: {e}")
+
+    def _call_is_up(self):
+        call = self._active
+        return bool(call is not None and call.state != "done")
+
+    def _face_watchdog(self):
+        """Face detection must never be left off.
+
+        The call restores it, and a crash is caught at the next start - but an
+        unanswered press, a call that ends in some way nobody thought of, or a
+        wedged one would all leave a camera half-armed until then. So: while
+        nothing is on a call, anything still recorded as paused gets put back.
+        A hard ceiling covers the case where a call is somehow up forever.
+        """
+        while True:
+            time.sleep(self.face_check_seconds)
+            try:
+                paused = self._read_face()
+                if not paused:
+                    continue
+                with self._lock:
+                    if not self._call_is_up():
+                        self._restore_faces("- no call is up")
+                        continue
+                    oldest = min((r.get("at", 0) if isinstance(r, dict) else 0)
+                                 for r in paused.values())
+                if oldest and time.time() - oldest > self.face_max_seconds:
+                    self.log(f"protect: face detection has been paused over "
+                             f"{self.face_max_seconds}s - restoring it regardless")
+                    self._restore_faces("- paused too long")
+            except Exception as e:
+                self.log(f"protect: face watchdog: {e!r}")
 
     def _autodetect(self, cams):
         for cam in cams:
@@ -627,13 +795,15 @@ class ProtectDoors:
             if row is None:
                 row = {"name": e["name"], "camera_id": e["camera_id"], "camera_name": e["camera_name"],
                        "call": bool(e["call"]), "triggers": list(e["triggers"]), "ring": list(e["ring"]),
-                       "talkback": bool(e["talkback"]), "quality": e["quality"]}
+                       "talkback": bool(e["talkback"]), "quality": e["quality"],
+                       "pause_face": bool(e["pause_face"])}
                 existing.append(row)
                 changed = True
             if overwrite:
                 # A save from the page IS the operator speaking; take it verbatim.
                 row.update(call=bool(e["call"]), triggers=list(e["triggers"]), ring=list(e["ring"]),
-                           talkback=bool(e["talkback"]), quality=e["quality"])
+                           talkback=bool(e["talkback"]), quality=e["quality"],
+                           pause_face=bool(e["pause_face"]))
                 changed = True
             # Informational, refreshed each start; the operator's own fields are left alone.
             for k in ("type", "available"):
@@ -768,6 +938,8 @@ class ProtectDoors:
                 e["ring"] = [str(x).strip().lower() for x in (r["ring"] or []) if str(x).strip()] or ["all"]
             if "talkback" in r:
                 e["talkback"] = bool(r["talkback"])
+            if "pause_face" in r:
+                e["pause_face"] = bool(r["pause_face"])
             if r.get("quality") in ("low", "medium", "high"):
                 e["quality"] = r["quality"]
             if e["call"] and not e["triggers"]:
@@ -781,7 +953,7 @@ class ProtectDoors:
         return {"saved": touched, "persisted": bool(persisted),
                 "calling": armed}
 
-    def probe(self, name_or_user, seconds=8, quality=None):
+    def probe(self, name_or_user, seconds=8, quality=None, codec=None):
         """Pull a camera's media exactly as a call would, into throwaway sinks.
 
         Proves the picture and the voice really flow, and at what rate, with no
@@ -810,9 +982,14 @@ class ProtectDoors:
             sk.bind(("127.0.0.1", 0))
             sk.settimeout(0.5)
             socks[kind] = sk
+        # G.722 by default: that is what a call negotiates, so a probe that used
+        # G.711 would be measuring something the panels never hear.
+        pt = {"g722": sip.G722, "pcmu": sip.PCMU, "pcma": sip.PCMA}.get(
+            str(codec or "g722").lower(), sip.G722)
         cmd = downstream_cmd(self.ffmpeg, url,
                              video=("127.0.0.1", socks["video"].getsockname()[1]),
-                             audio=("127.0.0.1", socks["audio"].getsockname()[1]))
+                             audio=("127.0.0.1", socks["audio"].getsockname()[1]),
+                             audio_pt=pt)
         stats = {k: {"packets": 0, "bytes": 0, "pt": None, "first": None, "last": None,
                      "gaps": 0, "prev": None} for k in socks}
         errs = []
@@ -877,7 +1054,7 @@ class ProtectDoors:
                 pass
 
         out = {"camera": entry["name"], "quality": quality, "seconds": seconds,
-               "rang": False, "ffmpegErrors": errs[-4:]}
+               "codec": sip.rtpmap_for(pt), "rang": False, "ffmpegErrors": errs[-4:]}
         for kind, st in stats.items():
             span = (st["last"] - st["first"]) if st["first"] and st["last"] and st["last"] > st["first"] else 0
             out[kind] = {"packets": st["packets"], "bytes": st["bytes"], "payloadType": st["pt"],
@@ -894,7 +1071,9 @@ class ProtectDoors:
                 "ffmpeg": bool(shutil.which("ffmpeg")),
                 "cameras": [{"name": e["name"], "type": e["type"], "camera_id": e["camera_id"],
                              "call": bool(e["call"]), "triggers": e["triggers"], "available": e["available"],
-                             "ring": e["ring"], "talkback": bool(e["talkback"]), "quality": e["quality"]} for e in self.cameras],
+                             "ring": e["ring"], "talkback": bool(e["talkback"]), "quality": e["quality"],
+                             "pause_face": bool(e["pause_face"]),
+                             "has_face": "face" in (e["available"] or [])} for e in self.cameras],
                 "active": self._active.state if self._active else None,
                 "debug": self.debug}
 

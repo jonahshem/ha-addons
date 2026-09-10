@@ -357,8 +357,19 @@ def digest(challenge, *, username, password, method, uri, cnonce=None, nc=1):
 # -- SDP -------------------------------------------------------------------
 
 PCMU = 0
+# G.722 is 16 kHz audio, but RFC 3551 froze its RTP clock at 8000 by mistake
+# and everyone kept the mistake. The rtpmap MUST say 8000 or the far end
+# plays it at the wrong speed.
+G722 = 9
 PCMA = 8
 TELEPHONE_EVENT = 101
+
+CODEC_NAMES = {PCMU: "PCMU/8000", PCMA: "PCMA/8000", G722: "G722/8000"}
+
+
+def rtpmap_for(pt):
+    """The rtpmap a payload type must be announced with."""
+    return CODEC_NAMES.get(pt, "PCMU/8000")
 
 
 H264 = 96          # the usual dynamic type; the far end's own number is echoed back
@@ -378,7 +389,6 @@ def sdp_answer(*, address, audio_port, audio_codec=PCMU, video_port=None, video=
     the offer had none, and it never claims to send video, only to receive it.
     """
     sid = session_id or int(time.time())
-    names = {PCMU: "PCMU/8000", PCMA: "PCMA/8000"}
     lines = [
         "v=0",
         f"o=homeui {sid} {sid} IN IP4 {address}",
@@ -386,7 +396,7 @@ def sdp_answer(*, address, audio_port, audio_codec=PCMU, video_port=None, video=
         f"c=IN IP4 {address}",
         "t=0 0",
         f"m=audio {audio_port} RTP/AVP {audio_codec} {TELEPHONE_EVENT}",
-        f"a=rtpmap:{audio_codec} {names.get(audio_codec, 'PCMU/8000')}",
+        f"a=rtpmap:{audio_codec} {rtpmap_for(audio_codec)}",
         f"a=rtpmap:{TELEPHONE_EVENT} telephone-event/8000",
         f"a=fmtp:{TELEPHONE_EVENT} 0-15",
         "a=ptime:20",
@@ -498,7 +508,7 @@ def pick_video(offer):
     return None
 
 
-def pick_codec(offer, ours=(PCMU, PCMA)):
+def pick_codec(offer, ours=(G722, PCMU, PCMA)):
     """The caller's most-preferred codec that we also have.
 
     Their order, not ours: RFC 3264 says the offer is listed in preference

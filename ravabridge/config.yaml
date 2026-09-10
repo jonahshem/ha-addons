@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.9.0"
+version: "0.10.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -64,6 +64,10 @@ options:
     host: ""
     pin: "2129918115"
     debug: false
+    # Face detection is lifted for the length of a call and put back after. The watchdog
+    # checks this often, and restores it regardless after this long, so it can never stick.
+    face_check_seconds: 20
+    face_max_seconds: 300
   intercom_devices: []
   #  - name: NAX Speakers
   #    uuid: a99a07fd-019d-4353-9fb1-af265a49b721
@@ -98,6 +102,7 @@ options:
     #    quality: medium      # low | medium | high - medium starts fastest for its picture
     #    ring: ["all"]
     #    talkback: true
+    #    pause_face: true    # stop it recognising faces while a call is up
     doorbells: []
   # Optional: POST /unlock opens this UniFi Access door.
   access:
@@ -178,6 +183,8 @@ schema:
     api_key: password?
     autodetect: bool?
     debug: bool?
+    face_check_seconds: int?
+    face_max_seconds: int?
     ring_seconds: int?
     max_call_seconds: int?
     ring:
@@ -190,6 +197,7 @@ schema:
         call: bool?
         quality: str?
         talkback: bool?
+        pause_face: bool?
         enable_rtsp: bool?
         cooldown_seconds: int?
         type: str?

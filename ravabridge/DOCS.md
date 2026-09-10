@@ -154,8 +154,8 @@ what Protect offers for that camera: `motion`, a smart detection (`person`,
 
 ```
 press / detection (events WS)  ->  INVITE 127.0.0.1:5060  ->  bridge rings the panels
-camera RTSP                    ->  ffmpeg  ->  H.264 (copied) + G.711 (from AAC)  ->  panels
-panel voice                    ->  bridge  ->  G.711  ->  ffmpeg  ->  Opus  ->  camera speaker
+camera RTSP                    ->  ffmpeg  ->  H.264 (copied) + G.722 (from AAC)  ->  panels
+panel voice                    ->  bridge  ->  G.722  ->  ffmpeg  ->  Opus  ->  camera speaker
 ```
 
 Video is copied through untouched; only audio is transcoded, which is why this
@@ -174,6 +174,21 @@ Assistant renders a list of objects as a YAML blob rather than form fields, so
 the controls live on the bridge's own page instead, next to the panels and
 doors they act on.
 A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s.
+
+**The audio is G.722, not G.711.** A panel lists G.722 first among its codecs
+and a Protect doorbell records at 16 kHz, so they meet at the same rate and
+nothing is thrown away. G.711 would halve it to 8 kHz and quantise it to eight
+bits, which is what made an early build sound like a telephone. The bridge
+copies audio packets rather than transcoding them, so the panel is offered
+exactly the codec the door is sending and nothing else.
+
+**A doorbell stops reading faces while you are talking to it.** Left alone it
+goes on recognising the visitor for the whole conversation, granting or denying
+access over and over, because Protect has no idea a call is happening. So `face`
+is lifted out of that camera's detections for the length of the call and put
+back at the end. What was there is written to `/data` first, so a crash
+mid-call restores it at the next start rather than leaving a camera half-armed.
+Turn it off per camera with **Pause face** on the page.
 
 **Stream quality matters more than it looks.** Measured on the G6 Entry with
 the probe: `high` takes **5.4 s** to its first video packet - a panel ringing

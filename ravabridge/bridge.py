@@ -519,12 +519,17 @@ class DoorCall:
 
     def panel_offer(self, leg):
         b = self.bridge
+        codec = self.audio_codec if self.audio_codec is not None else rtp.PCMU
         sid = int(time.time())
         lines = [
             "v=0", f"o=ravabridge {sid} {sid} IN IP4 {b.address}", "s=RavaBridge",
             f"c=IN IP4 {b.address}", "t=0 0",
-            f"m=audio {leg.audio_port} RTP/AVP 0 8 101",
-            "a=rtpmap:0 PCMU/8000", "a=rtpmap:8 PCMA/8000",
+            # The door's own codec, and only that: audio is copied packet for
+            # packet, never transcoded, so a panel that picked a different one
+            # would be decoding the wrong thing. G.722 is 16 kHz and a panel
+            # lists it first, which is what a doorbell should be heard in.
+            f"m=audio {leg.audio_port} RTP/AVP {codec} 101",
+            f"a=rtpmap:{codec} {sip.rtpmap_for(codec)}",
             "a=rtpmap:101 telephone-event/8000", "a=fmtp:101 0-15", "a=ptime:20", "a=sendrecv",
         ]
         if self.video:
@@ -819,7 +824,7 @@ class Bridge:
         lines = ["v=0", f"o=ravabridge {sid} {sid + 1} IN IP4 {self.address}", "s=RavaBridge",
                  f"c=IN IP4 {self.address}", "t=0 0",
                  f"m=audio {leg.audio_port} RTP/AVP {codec}",
-                 f"a=rtpmap:{codec} {'PCMA/8000' if codec == rtp.PCMA else 'PCMU/8000'}", "a=ptime:20", "a=sendrecv"]
+                 f"a=rtpmap:{codec} {sip.rtpmap_for(codec)}", "a=ptime:20", "a=sendrecv"]
         v = offer.get("video")
         if v and v.get("port"):
             pt = v["payloads"][0] if v.get("payloads") else PANEL_H264_PT

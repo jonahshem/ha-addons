@@ -83,11 +83,12 @@ async function loadProtect(){
       <td><select class="c-trig" multiple size="4" style="min-width:13rem">${opts}</select></td>
       <td><input class="c-ring" value="${esc((c.ring||[]).join(', '))}" size="12"></td>
       <td><input type="checkbox" class="c-talk"${c.talkback?' checked':''}></td>
+      <td>${c.has_face?`<input type="checkbox" class="c-face"${c.pause_face?' checked':''}>`:'<span class="muted">—</span>'}</td>
       <td><select class="c-q">${q}</select></td>
       <td><button onclick="probe(this,'${esc(c.name)}')">Test media</button>
           <button onclick="ringCam('${esc(c.name)}')" title="This RINGS every panel">Ring…</button></td></tr>`;
   };
-  el.innerHTML='<table><tr><th>Camera</th><th>Call</th><th>Triggers (ctrl-click for more)</th><th>Rings</th><th>Talkback</th><th>Quality</th><th></th></tr>'
+  el.innerHTML='<table><tr><th>Camera</th><th>Call</th><th>Triggers (ctrl-click for more)</th><th>Rings</th><th>Talkback</th><th title="Stop the camera recognising faces while a call is up">Pause face</th><th>Quality</th><th></th></tr>'
     +d.cameras.map(row).join('')+'</table>'
     +'<div style="margin-top:.5rem"><button onclick="saveProtect()">Save cameras</button> '
     +'<span class="muted">“Test media” pulls the picture and sound only — it rings nothing. “Ring…” places a real call to the panels.</span></div>';
@@ -99,6 +100,7 @@ function saveProtect(){
     triggers:[...tr.querySelector('.c-trig').selectedOptions].map(o=>o.value),
     ring:tr.querySelector('.c-ring').value.split(',').map(x=>x.trim()).filter(Boolean),
     talkback:tr.querySelector('.c-talk').checked,
+    pause_face:tr.querySelector('.c-face')?tr.querySelector('.c-face').checked:true,
     quality:tr.querySelector('.c-q').value}));
   document.getElementById('pmsg').textContent='saving…';
   fetch('protectsave',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cameras:rows})})
@@ -109,7 +111,7 @@ function probe(btn,name){
   fetch('protectprobe?seconds=8&camera='+encodeURIComponent(name),{method:'POST'}).then(r=>r.json()).then(d=>{
     btn.textContent=was; btn.disabled=false;
     document.getElementById('pmsg').textContent = d.error ? (name+': '+d.error)
-      : `${name}: picture ${d.video.startedAfter}s ${d.video.perSecond}/s, sound ${d.audio.startedAfter}s ${d.audio.perSecond}/s${d.audioSteady?'':' (audio not steady)'} — nothing rang`;
+      : `${name}: picture ${d.video.startedAfter}s ${d.video.perSecond}/s, sound ${d.audio.startedAfter}s ${d.audio.perSecond}/s ${d.codec}${d.audioSteady?'':' (audio not steady)'} — nothing rang`;
   });
 }
 function ringCam(name){
@@ -256,7 +258,8 @@ class Handler(BaseHTTPRequestHandler):
                 secs = int(secs)
             except ValueError:
                 secs = 8
-            self._json(pd.probe(which, secs, (q.get("quality") or [""])[0] or None))
+            self._json(pd.probe(which, secs, (q.get("quality") or [""])[0] or None,
+                                (q.get("codec") or [""])[0] or None))
             return
         if path == "/protectring":         # one path segment: _tail() keeps only the last
             pd = getattr(BRIDGE, "protect", None)

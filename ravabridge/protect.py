@@ -158,6 +158,12 @@ class ProtectClient:
                           body={"qualities": list(qualities)})
         return {q: (data or {}).get(q) for q in QUALITIES}
 
+    def patch_camera(self, camera_id, body):
+        """Change a camera's settings. The only one this add-on writes is
+        `smartDetectSettings`, to stop a doorbell reading faces while somebody
+        is talking to it - and it puts back exactly what it found."""
+        return self._json("PATCH", "/v1/cameras/%s" % urllib.parse.quote(camera_id), body=body)
+
     def talkback_session(self, camera_id):
         """Where to send the reply audio, and in what format.
 
