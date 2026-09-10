@@ -489,7 +489,11 @@ class ProtectDoors:
             "call": bool(call) if call is not None else None,
             "triggers": [str(t).strip().lower() for t in (c.get("triggers") or []) if str(t).strip()],
             "ring": [str(r).strip().lower() for r in (c.get("ring") or []) if str(r).strip()] or list(self.default_ring),
-            "quality": str(c.get("quality") or "high"),
+            # medium, not high: measured on a G6 Entry, the high stream takes 5.4 s to
+            # its first packet (a panel ringing with a blank screen) at 3.2 Mbit/s with
+            # packets dropping, while medium starts in 2.5 s at 400 kbit/s and loses
+            # none - and a panel is 1280x800, so the high stream was only downscaled.
+            "quality": str(c.get("quality") or "medium"),
             "talkback": c.get("talkback"),               # None: decided by the camera having a speaker
             "enable_rtsp": bool(c.get("enable_rtsp", True)),
             "cooldown": c.get("cooldown_seconds"),

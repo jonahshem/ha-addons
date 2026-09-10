@@ -168,6 +168,12 @@ Settings -> Control Plane -> Integrations), restart, and open the Configuration
 page: each camera is there with `call`, `triggers`, `ring`, `talkback` to edit.
 A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s.
 
+**Stream quality matters more than it looks.** Measured on the G6 Entry with
+the probe: `high` takes **5.4 s** to its first video packet - a panel ringing
+with a blank screen - at 3.2 Mbit/s, and drops packets; `medium` starts in
+**2.5 s** at 400 kbit/s and loses none; `low` starts in 1.4 s. A panel is
+1280x800, so `high` was only ever downscaled. `medium` is the default.
+
 **Checking a camera without ringing anybody.** `POST /protectprobe?camera=NAME`
 pulls that camera through the very same ffmpeg a call uses, into throwaway
 sinks, and reports what arrived: packets, payload type, packets per second,

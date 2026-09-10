@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.8.2"
+version: "0.8.3"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -95,6 +95,7 @@ options:
     #  - name: Front Door          # filled in by auto-detect; edit `call` and `triggers`
     #    call: true
     #    triggers: ["ring"]
+    #    quality: medium      # low | medium | high - medium starts fastest for its picture
     #    ring: ["all"]
     #    talkback: true
     doorbells: []
