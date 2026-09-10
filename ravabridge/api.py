@@ -7,6 +7,7 @@
     POST /ring?door=NAME    ring that door's panels with no media, to prove the wiring
     POST /hangup            end every call
     POST /unlock?door=NAME  open that door through UniFi Access (needs `access` + the door's id)
+    POST /protectprobe?camera=NAME  pull a Protect camera's media only - proves it flows, rings nothing
 
 Reachable through Home Assistant's ingress, or on the LAN with the bearer
 token. The token defaults to the PIN this dealer already uses, so a fresh
@@ -167,6 +168,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/unlock":
             self._json(unlock((q.get("door") or [""])[0]))
+            return
+        if path == "/protectprobe":         # media only: pulls the camera, rings nothing
+            pd = getattr(BRIDGE, "protect", None)
+            if not pd or not pd.enabled:
+                self._json({"error": "no Protect console configured"}, 400)
+                return
+            which = (q.get("camera") or q.get("door") or q.get("name") or [""])[0]
+            if not which and pd.cameras:
+                which = pd.cameras[0]["name"]
+            secs = (q.get("seconds") or ["8"])[0]
+            try:
+                secs = int(secs)
+            except ValueError:
+                secs = 8
+            self._json(pd.probe(which, secs))
             return
         if path == "/protectring":         # one path segment: _tail() keeps only the last
             pd = getattr(BRIDGE, "protect", None)

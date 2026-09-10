@@ -136,7 +136,8 @@ POST /ring?door=NAME    ring the door's panels with no media - proves the addres
 POST /hangup            end every call
 POST /unlock?door=NAME  open that door through UniFi Access
 GET  /protect           every Protect camera: type, call, triggers, what it offers, ffmpeg present
-POST /protectring?camera=NAME place that camera's call now, as if it had triggered
+POST /protectring?camera=NAME place that camera's call now, as if it had triggered (THIS RINGS THE PANELS)
+POST /protectprobe?camera=NAME&seconds=8   pull its media only: proves video and audio flow. Rings nothing
 ```
 
 ## UniFi Protect cameras (the doorbell is a camera, not a SIP device)
@@ -165,8 +166,16 @@ does; most cameras do not, and `talkback` defaults accordingly).
 Set `protect.host` (the console IP) and `protect.api_key` (Protect app ->
 Settings -> Control Plane -> Integrations), restart, and open the Configuration
 page: each camera is there with `call`, `triggers`, `ring`, `talkback` to edit.
-A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s. Test
-any camera without a press: `POST /protectring?camera=Front%20Door`.
+A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s.
+
+**Checking a camera without ringing anybody.** `POST /protectprobe?camera=NAME`
+pulls that camera through the very same ffmpeg a call uses, into throwaway
+sinks, and reports what arrived: packets, payload type, packets per second,
+how long before the first one, and any sequence gaps. G.711 should sit at ~50
+a second (`audioSteady`). No SIP, no panels. `POST /protectring?camera=NAME`
+does place the real call - it rings every panel in the camera's `ring` list,
+so keep it for when somebody is expecting it. `protect.debug: true` logs every
+event the console sends, which is how to watch triggers arrive without calling.
 
 ## Options
 

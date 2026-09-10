@@ -32,6 +32,7 @@ import threading
 import time
 
 import protect
+import rtp
 import sip
 
 
@@ -46,6 +47,24 @@ def _free_udp_port():
 
 def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "protect-door"
+
+
+def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None):
+    """The ffmpeg that carries a camera: video copied as-is, audio to G.711.
+
+    `video` and `audio` are (host, port) - or (host, port, ttl) for a multicast
+    video target. One function, so a probe exercises exactly what a call runs.
+    """
+    outs = []
+    if video:
+        ttl = f"&ttl={video[2]}" if len(video) > 2 and video[2] else ""
+        outs += ["-map", "0:v:0", "-c:v", "copy", "-an", "-payload_type", "96",
+                 "-f", "rtp", f"rtp://{video[0]}:{video[1]}?pkt_size=1200{ttl}"]
+    if audio:
+        outs += ["-map", "0:a:0", "-vn", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
+                 "-payload_type", "0", "-f", "rtp", f"rtp://{audio[0]}:{audio[1]}"]
+    return [ffmpeg, "-hide_banner", "-loglevel", "warning", "-fflags", "nobuffer",
+            "-rtsp_transport", "tcp", "-i", rtsp_url] + outs
 
 
 class _AudioLeg:
@@ -318,25 +337,17 @@ class ProtectCall:
     def _start_downstream(self, rtsp_url, answer):
         a = answer.get("audio") or {}
         v = answer.get("video") or {}
-        ba = (a.get("address") or self.b.address, a.get("port"))
-        bv = (v.get("address") or self.b.address, v.get("port"))
         if not a.get("port"):
             self.log(f"protect: {self.bell['name']} - the bridge offered no audio port")
             return
-        self.audio.bridge_audio = ba
-        outs = []
+        self.audio.bridge_audio = (a.get("address") or self.b.address, a["port"])
+        video = None
         if v.get("port"):
-            # Split the multicast address (c= can be group/ttl); ffmpeg wants ttl as a param.
-            vhost = bv[0].split("/")[0]
-            vttl = ""
-            if "/" in bv[0]:
-                vttl = "&ttl=" + bv[0].split("/")[1]
-            outs += ["-map", "0:v:0", "-c:v", "copy", "-an", "-payload_type", "96",
-                     "-f", "rtp", f"rtp://{vhost}:{bv[1]}?pkt_size=1200{vttl}"]
-        outs += ["-map", "0:a:0", "-vn", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
-                 "-payload_type", "0", "-f", "rtp", f"rtp://127.0.0.1:{self.audio.from_ffmpeg_port}"]
-        cmd = [self.mgr.ffmpeg, "-hide_banner", "-loglevel", "warning", "-fflags", "nobuffer",
-               "-rtsp_transport", "tcp", "-i", rtsp_url] + outs
+            # The bridge's c= for video may be `group/ttl`; ffmpeg wants the ttl apart.
+            host = v.get("address") or self.b.address
+            video = (host.split("/")[0], v["port"], host.split("/")[1] if "/" in host else "")
+        cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video,
+                             audio=("127.0.0.1", self.audio.from_ffmpeg_port))
         self.ffdown = self._spawn(cmd, "ffmpeg-down")
 
     def _start_talkback(self):
@@ -433,6 +444,7 @@ class ProtectDoors:
         self.host = str(pc.get("host") or "").strip()
         self.api_key = str(pc.get("api_key") or "").strip()
         self.autodetect = bool(pc.get("autodetect", True))
+        self.debug = bool(pc.get("debug"))
         self.default_ring = [str(r).strip().lower() for r in (pc.get("ring") or ["all"]) if str(r).strip()] or ["all"]
         self.ring_seconds = int(pc.get("ring_seconds") or bridge.ring_seconds or 60)
         self.max_call_seconds = int(pc.get("max_call_seconds") or 3600)
@@ -637,6 +649,9 @@ class ProtectDoors:
         if not cam_id or not etype:
             return
         entry = self._by_camera.get(cam_id)
+        if self.debug:
+            self.log(f"protect event: {etype} from {entry['name'] if entry else cam_id} "
+                     f"{item.get('smartDetectTypes') or ''}".rstrip())
         if entry is None and etype == "ring" and self.autodetect:
             # It rang, so it is a doorbell we did not know about. Adopt it.
             name = f"Doorbell {cam_id[-4:]}"
@@ -710,13 +725,122 @@ class ProtectDoors:
                 return True
         return False
 
+    def probe(self, name_or_user, seconds=8):
+        """Pull a camera's media exactly as a call would, into throwaway sinks.
+
+        Proves the picture and the voice really flow, and at what rate, with no
+        SIP call in it: nothing rings. The safe way to check a camera.
+        """
+        key = slugify(name_or_user)
+        entry = next((e for e in self.cameras
+                      if e["user"] == key or slugify(e["name"]) == key
+                      or slugify(e["camera_name"] or "") == key), None)
+        if entry is None:
+            return {"error": f"no Protect camera called {name_or_user!r}"}
+        if not self.client:
+            return {"error": "the Protect console is not configured"}
+        seconds = max(2, min(30, int(seconds or 8)))
+        try:
+            url, quality = self.client.stream_url(entry["camera_id"], entry["quality"],
+                                                  enable=entry["enable_rtsp"])
+        except Exception as e:
+            return {"error": f"could not get an RTSP stream: {e}"}
+        if not url:
+            return {"error": "the camera has no RTSP stream and one could not be enabled"}
+
+        socks = {}
+        for kind in ("video", "audio"):
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sk.bind(("127.0.0.1", 0))
+            sk.settimeout(0.5)
+            socks[kind] = sk
+        cmd = downstream_cmd(self.ffmpeg, url,
+                             video=("127.0.0.1", socks["video"].getsockname()[1]),
+                             audio=("127.0.0.1", socks["audio"].getsockname()[1]))
+        stats = {k: {"packets": 0, "bytes": 0, "pt": None, "first": None, "last": None,
+                     "gaps": 0, "prev": None} for k in socks}
+        errs = []
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            for sk in socks.values():
+                sk.close()
+            return {"error": "ffmpeg is not installed in this add-on"}
+
+        def drain():
+            for raw in iter(proc.stderr.readline, b""):
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    errs.append(line[:200])
+        threading.Thread(target=drain, daemon=True).start()
+
+        stop = threading.Event()
+
+        def collect(kind):
+            sk, st = socks[kind], stats[kind]
+            while not stop.is_set():
+                try:
+                    data, _ = sk.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                now = time.time()
+                st["packets"] += 1
+                st["bytes"] += len(data)
+                pkt = rtp.unpack(data)
+                if pkt:
+                    st["pt"] = pkt["pt"]
+                    seq = pkt.get("seq")
+                    if st["prev"] is not None and seq is not None and seq != (st["prev"] + 1) % 65536:
+                        st["gaps"] += 1
+                    st["prev"] = seq
+                if st["first"] is None:
+                    st["first"] = now
+                st["last"] = now
+
+        started = time.time()
+        for k in socks:
+            threading.Thread(target=collect, args=(k,), daemon=True).start()
+        time.sleep(seconds)
+        stop.set()
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        time.sleep(0.3)
+        for sk in socks.values():
+            try:
+                sk.close()
+            except OSError:
+                pass
+
+        out = {"camera": entry["name"], "quality": quality, "seconds": seconds,
+               "rang": False, "ffmpegErrors": errs[-4:]}
+        for kind, st in stats.items():
+            span = (st["last"] - st["first"]) if st["first"] and st["last"] and st["last"] > st["first"] else 0
+            out[kind] = {"packets": st["packets"], "bytes": st["bytes"], "payloadType": st["pt"],
+                         "perSecond": round(st["packets"] / span, 1) if span else 0,
+                         "startedAfter": round(st["first"] - started, 2) if st["first"] else None,
+                         "streamedFor": round(span, 1), "sequenceGaps": st["gaps"]}
+        out["ok"] = stats["video"]["packets"] > 0 and stats["audio"]["packets"] > 0
+        # G.711 at 20 ms is 50 packets a second; well under that is a stuttering voice.
+        out["audioSteady"] = bool(out["audio"]["perSecond"] >= 45)
+        return out
+
     def public(self):
         return {"enabled": self.enabled, "host": self.host, "autodetect": self.autodetect,
                 "ffmpeg": bool(shutil.which("ffmpeg")),
                 "cameras": [{"name": e["name"], "type": e["type"], "camera_id": e["camera_id"],
                              "call": bool(e["call"]), "triggers": e["triggers"], "available": e["available"],
                              "ring": e["ring"], "talkback": bool(e["talkback"])} for e in self.cameras],
-                "active": self._active.state if self._active else None}
+                "active": self._active.state if self._active else None,
+                "debug": self.debug}
 
 
 def _cseq(msg):
