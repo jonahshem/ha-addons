@@ -135,7 +135,33 @@ POST /discover          find panels and doors now
 POST /ring?door=NAME    ring the door's panels with no media - proves the addressing
 POST /hangup            end every call
 POST /unlock?door=NAME  open that door through UniFi Access
+GET  /protect           the Protect doorbells, camera bindings, whether ffmpeg is present
+POST /protect/ring?door=NAME  place a Protect doorbell's call now, as if it were pressed
 ```
+
+## UniFi Protect doorbells (a camera, not a SIP device)
+
+A UniFi Protect doorbell speaks no SIP, so the bridge stands in for one. It
+holds Protect's events socket open, and on a press it places a loopback SIP call
+into this same bridge - so every panel rings with the doorbell's picture and
+two-way audio, and the panel side is the code that was already there.
+
+```
+press (events WS)  ->  INVITE 127.0.0.1:5060  ->  bridge rings the panels
+doorbell RTSP      ->  ffmpeg  ->  H.264 (copied) + G.711 (from AAC)  ->  panels
+panel voice        ->  bridge  ->  G.711  ->  ffmpeg  ->  Opus  ->  talkback
+```
+
+Video is copied through untouched; only audio is transcoded, which is why this
+add-on carries **ffmpeg**. The picture starts on the panels while they are still
+ringing (early media). Talking back goes out the doorbell's own speaker through
+Protect's `talkback-session`.
+
+Configure `protect.host` (the console IP), `protect.api_key` (Protect app ->
+Settings -> Control Plane -> Integrations), and one `doorbells[]` entry per bell:
+`camera_name` (or `camera_id`), `ring[]` like a door, `quality` (default `high`),
+`talkback` (default on). Test it without pressing anything:
+`POST /protect/ring?door=Front%20Door`.
 
 ## Options
 
@@ -151,6 +177,7 @@ POST /unlock?door=NAME  open that door through UniFi Access
 | `log_sip` | print every SIP message. The switch to flip when a door will not ring |
 | `talk` | UniFi Talk third-party device credentials |
 | `access` | UniFi Access console, developer API token and door id, for `/unlock` |
+| `protect` | UniFi Protect doorbells: `host`, `api_key`, `doorbells[]` (`name`, `camera_name`/`camera_id`, `ring[]`, `quality`, `talkback`). Needs ffmpeg (in the image) |
 | `api_token`, `api_port` | the LAN lock on the API, default the dealer PIN |
 
 ## Testing without a house

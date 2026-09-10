@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.5.1"
+version: "0.6.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -76,6 +76,21 @@ options:
     user: ""
     password: ""
     ring: ["all"]
+  # A UniFi Protect doorbell (a camera, not a SIP device) rings the panels like a SIP door:
+  # the add-on watches the Protect events socket and, on a press, places a loopback SIP call into
+  # this same bridge, feeding it the doorbell's RTSP as H.264 video + G.711 audio and carrying the
+  # panel's voice back out the doorbell speaker (talkback). Needs ffmpeg (in the image). Give the
+  # console host and an Integration API key (Protect app > Settings > Control Plane > Integrations),
+  # then one entry per doorbell (camera_name or camera_id; `ring` is which panels/groups, like a door).
+  protect:
+    host: ""
+    api_key: ""
+    doorbells: []
+    #  - name: Front Door
+    #    camera_name: Front Door
+    #    ring: ["all"]
+    #    quality: high
+    #    talkback: true
   # Optional: POST /unlock opens this UniFi Access door.
   access:
     host: ""
@@ -150,6 +165,22 @@ schema:
     host: str?
     token: password?
     door_id: str?
+  protect:
+    host: str?
+    api_key: password?
+    ring_seconds: int?
+    max_call_seconds: int?
+    doorbells:
+      - name: str
+        user: str?
+        camera_id: str?
+        camera_name: str?
+        quality: str?
+        talkback: bool?
+        enable_rtsp: bool?
+        ring:
+          - str
+
   api_token: str
   api_port: int
   bind_ip: str?

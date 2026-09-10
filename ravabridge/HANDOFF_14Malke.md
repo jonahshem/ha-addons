@@ -1,3 +1,20 @@
+> **SUPERSEDED 2026-09-09.** The current state of 14 Malke is in
+> `NaxAes67Sender/HANDOFF_14Malke_Announcements.md`. Read that first. What changed since this was written:
+>
+> - **A second real panel is installed** (Social Room `192.168.0.17`, device 99032). Pages now send; five clean
+>   pages in a row were relayed to the speakers. The "pending second-panel test" below is done.
+> - **The fake "NAX Speakers" panel was REMOVED from the processor on 2026-09-09** (live file edit + `REBOOT`).
+>   **Do NOT run `python Tools/mc4r_fake_panel.py restore`** - its 2026-09-07 originals predate the second
+>   panel and would erase it. Removal backups: `Backups/14Malke_MC4R_2026-09-09-before-removal/` and
+>   `/user/Backups/intercom-2026-09-09-before-removal` on the MC4-R.
+> - **Rava Bridge 0.5.1 no longer registers with the processor** (the `crpc` / `intercom_devices` path is off).
+>   The relay posts `/live?zones=auto`; the fixed Den + Kitchen zones below are gone.
+> - **Sender 0.7.1**: stream moved to `239.69.4.5` (the switch would not re-forward the old group), speaker
+>   groups + per-zone volume on `/ui`, music resumed after a page via its own CRPC session.
+> - The relay's HTTP timeout was raised from 10 s to 90 s: five-zone pages timed out before the sender replied.
+>
+> Everything below is history as of 2026-09-08 and is kept for the processor-edit record and the boundary finding.
+
 # 14 Malke - what was done, and the state it is in (2026-09-07 / 08)
 
 Handoff for another session. Everything below was measured live; nothing is

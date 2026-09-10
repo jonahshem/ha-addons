@@ -53,5 +53,9 @@ if __name__ == "__main__":
     b.crpc = crpc.CrpcManager(cfg, log)
     if b.crpc.enabled:
         b.crpc.start()
+    import protectdoor
+    b.protect = protectdoor.ProtectDoors(b, cfg, log)
+    if b.protect.enabled:
+        b.protect.start()
     while True:
         time.sleep(3600)

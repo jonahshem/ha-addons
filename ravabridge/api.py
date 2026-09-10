@@ -131,7 +131,13 @@ class Handler(BaseHTTPRequestHandler):
                                "supervisor": dict(discover.SUPERVISOR_STATE)}
             crpc_mgr = getattr(BRIDGE, "crpc", None)
             st["crpc"] = crpc_mgr.public() if crpc_mgr else None
+            pd = getattr(BRIDGE, "protect", None)
+            st["protect"] = pd.public() if pd else None
             self._json(st)
+            return
+        if path == "/protect":
+            pd = getattr(BRIDGE, "protect", None)
+            self._json(pd.public() if pd else {"error": "no Protect doorbells configured"})
             return
         self._json({"error": "not found"}, 404)
 
@@ -161,6 +167,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/unlock":
             self._json(unlock((q.get("door") or [""])[0]))
+            return
+        if path == "/protect/ring":
+            pd = getattr(BRIDGE, "protect", None)
+            if not pd or not pd.enabled:
+                self._json({"error": "no Protect doorbells configured"}, 400)
+                return
+            which = (q.get("door") or q.get("name") or [""])[0]
+            if not which and pd.doorbells:
+                which = pd.doorbells[0]["name"]
+            ok = pd.ring_now(which)
+            self._json({"ringing": which} if ok else {"error": f"no Protect doorbell called {which!r}"},
+                       200 if ok else 404)
             return
         self._json({"error": "not found"}, 404)
 
