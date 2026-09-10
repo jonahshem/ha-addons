@@ -733,7 +733,7 @@ class ProtectDoors:
                 return True
         return False
 
-    def probe(self, name_or_user, seconds=8):
+    def probe(self, name_or_user, seconds=8, quality=None):
         """Pull a camera's media exactly as a call would, into throwaway sinks.
 
         Proves the picture and the voice really flow, and at what rate, with no
@@ -749,7 +749,7 @@ class ProtectDoors:
             return {"error": "the Protect console is not configured"}
         seconds = max(2, min(30, int(seconds or 8)))
         try:
-            url, quality = self.client.stream_url(entry["camera_id"], entry["quality"],
+            url, quality = self.client.stream_url(entry["camera_id"], quality or entry["quality"],
                                                   enable=entry["enable_rtsp"])
         except Exception as e:
             return {"error": f"could not get an RTSP stream: {e}"}

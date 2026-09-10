@@ -182,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                 secs = int(secs)
             except ValueError:
                 secs = 8
-            self._json(pd.probe(which, secs))
+            self._json(pd.probe(which, secs, (q.get("quality") or [""])[0] or None))
             return
         if path == "/protectring":         # one path segment: _tail() keeps only the last
             pd = getattr(BRIDGE, "protect", None)
