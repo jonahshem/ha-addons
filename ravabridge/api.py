@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/unlock":
             self._json(unlock((q.get("door") or [""])[0]))
             return
-        if path == "/protect/ring":
+        if path == "/protectring":         # one path segment: _tail() keeps only the last
             pd = getattr(BRIDGE, "protect", None)
             if not pd or not pd.enabled:
                 self._json({"error": "no Protect doorbells configured"}, 400)

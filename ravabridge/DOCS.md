@@ -136,7 +136,7 @@ POST /ring?door=NAME    ring the door's panels with no media - proves the addres
 POST /hangup            end every call
 POST /unlock?door=NAME  open that door through UniFi Access
 GET  /protect           the Protect doorbells, camera bindings, whether ffmpeg is present
-POST /protect/ring?door=NAME  place a Protect doorbell's call now, as if it were pressed
+POST /protectring?door=NAME   place a Protect doorbell's call now, as if it were pressed
 ```
 
 ## UniFi Protect doorbells (a camera, not a SIP device)
@@ -161,7 +161,7 @@ Configure `protect.host` (the console IP), `protect.api_key` (Protect app ->
 Settings -> Control Plane -> Integrations), and one `doorbells[]` entry per bell:
 `camera_name` (or `camera_id`), `ring[]` like a door, `quality` (default `high`),
 `talkback` (default on). Test it without pressing anything:
-`POST /protect/ring?door=Front%20Door`.
+`POST /protectring?door=Front%20Door`.
 
 ## Options
 

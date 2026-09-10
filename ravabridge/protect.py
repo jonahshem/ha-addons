@@ -210,6 +210,7 @@ class EventsSocket:
     def _connect_and_read(self):
         host, port = self._hostport()
         raw = socket.create_connection((host, port), timeout=DEFAULT_TIMEOUT)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock = _ssl_context().wrap_socket(raw, server_hostname=host)
         self._sock = sock
         key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -228,6 +229,10 @@ class EventsSocket:
         if accept.lower() not in head.lower():
             raise ProtectError("events socket gave a bad accept key")
         self.log("protect events: subscribed")
+        # Block on reads rather than timing out every few seconds and reconnecting -
+        # a reconnect window is a window a press can fall through. A dead peer is
+        # caught by TCP keepalive (set above), which errors the recv and reconnects.
+        sock.settimeout(None)
         rest = buf.split(b"\r\n\r\n", 1)[1]
         self._read_frames(sock, rest)
 
