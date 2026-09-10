@@ -53,7 +53,11 @@ class _TokenBucket:
     reads exactly like a missing endpoint. Run at 8/s for headroom, shared by
     every caller in the process because the limit is per console."""
 
-    def __init__(self, rate=8.0, burst=8.0):
+    def __init__(self, rate=6.0, burst=4.0):
+        # A burst of 8 on top of the camera-list call put 10 requests inside one
+        # window and the tenth camera got a 429 (measured at 14 Malke). Smaller
+        # burst, slower refill: enumerating a house takes a second longer and
+        # never trips it.
         self._rate, self._burst = rate, burst
         self._tokens, self._at = burst, time.monotonic()
         self._lock = threading.Lock()
@@ -104,6 +108,17 @@ class ProtectClient:
                 return resp.status, resp.read(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
+            if exc.code == 429 and not getattr(req, "_retried", False):
+                # The console says exactly how long its window is (windowMs=1000).
+                # Wait it out once and go again rather than lose the camera.
+                time.sleep(1.1)
+                req._retried = True
+                _BUCKET.take()
+                try:
+                    with self._opener.open(req, timeout=self.timeout) as resp:
+                        return resp.status, resp.read(), resp.headers.get("Content-Type", "")
+                except urllib.error.HTTPError as exc2:
+                    exc, detail = exc2, exc2.read().decode("utf-8", "replace")[:300]
             if exc.code in (401, 403):
                 raise ProtectError(f"{method} {path} refused (HTTP {exc.code}): the API key is "
                                    f"wrong or from another console.") from exc
