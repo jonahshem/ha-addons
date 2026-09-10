@@ -16,9 +16,11 @@ there, and being briefly not there is the one thing that breaks the binding.
 Audio is 2ch/48k/S24BE at 1 ms packet time, which is what the NAX expects
 (Crestron KB 1001151) and what the SAP announcement claims.
 """
+import fcntl
 import os
 import queue
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
@@ -32,7 +34,12 @@ import sap                                        # noqa: E402
 
 Gst.init(None)
 
-IFACE = os.environ.get("IFACE", "end0")
+# Blank means "work it out". `end0` is the Raspberry Pi's built-in NIC and was
+# the default here for as long as this only ran on Pis; an Intel box calls the
+# same port `eno1` or `enp1s0` and a VM calls it `ens18`, so a hardcoded default
+# is a stream sent out of an interface that does not exist. Houses that already
+# have `end0` saved in their options keep it - see `resolve_iface`.
+IFACE = os.environ.get("IFACE", "").strip()
 MCAST = os.environ.get("MCAST", "239.69.4.4")     # inside 239.8.0.0-239.128.255.255
 PORT = int(os.environ.get("PORT", "5004"))
 PT = int(os.environ.get("PT", "98"))
@@ -56,6 +63,53 @@ def local_ip(towards="8.8.8.8"):
         return s.getsockname()[0]
     finally:
         s.close()
+
+
+def iface_for(ip):
+    """The name of the interface holding `ip`, or None.
+
+    SIOCGIFADDR rather than parsing `ip addr`: this image has iproute2, but a
+    name is worth reading straight from the kernel rather than out of text that
+    changes format between releases.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for _, name in socket.if_nameindex():
+            try:
+                packed = fcntl.ioctl(sock.fileno(), 0x8915,          # SIOCGIFADDR
+                                     struct.pack("256s", name[:15].encode()))
+            except OSError:
+                continue                                # no IPv4 on this one
+            if socket.inet_ntoa(packed[20:24]) == ip:
+                return name
+    finally:
+        sock.close()
+    return None
+
+
+def resolve_iface(src):
+    """Which interface the stream leaves by.
+
+    `src` was already chosen by the kernel, by routing towards the multicast
+    group, so the interface holding it is the right one by construction - on a
+    Pi (`end0`), an Intel box (`eno1`) or a VM (`ens18`), with nobody typing a
+    name.
+
+    A name that *was* typed wins, because a box with two NICs on the house LAN
+    is a real thing and only a person knows which one the amplifier is on. But a
+    name that does not exist here is reported and worked around rather than
+    used: a house whose NIC was renamed by an OS update should keep playing, and
+    failing silently is the one outcome nobody can diagnose.
+    """
+    present = {name for _, name in socket.if_nameindex()}
+    if IFACE and IFACE in present:
+        return IFACE
+    found = iface_for(src)
+    if IFACE:
+        print(f"[sender] configured iface={IFACE!r} is not on this box "
+              f"({', '.join(sorted(present))}) - using {found or 'the default route'}",
+              flush=True)
+    return found
 
 
 def decode_to_pcm(path):
@@ -150,14 +204,17 @@ def _push(appsrc, data):
 
 def build():
     src = local_ip(MCAST)
-    print(f"[sender] src={src} iface={IFACE} mcast={MCAST}:{PORT} "
+    iface = resolve_iface(src)
+    print(f"[sender] src={src} iface={iface or '(auto)'} mcast={MCAST}:{PORT} "
           f"pt={PT} session={SESSION!r}", flush=True)
 
     # PTP, in userspace, never disciplining the host clock. The NAX is its own
     # grandmaster on domain 0; a client that tries to take over would drag the
     # five DM-NVX with it, so `sap.py` also pins priority in the SDP.
     print("[sender] PTP supported:", GstNet.ptp_is_supported(), flush=True)
-    GstNet.ptp_init(GstNet.PTP_CLOCK_ID_NONE, [IFACE])
+    # An empty list means every interface, which is GStreamer's own default and
+    # the only sane answer if the interface could not be identified at all.
+    GstNet.ptp_init(GstNet.PTP_CLOCK_ID_NONE, [iface] if iface else [])
     clock = GstNet.PtpClock.new("ptp0", 0)
     print("[sender] waiting for PTP sync (up to 45s)…", flush=True)
     print("[sender] PTP synced:", clock.wait_for_sync(45 * Gst.SECOND), flush=True)
@@ -169,16 +226,17 @@ def build():
     # blocks in push-buffer once about 30 ms is queued, so the thread runs at
     # multicast-iface / bind-address: without them the multicast egress follows
     # whatever the host's default route happens to be, which on a box that also
-    # runs VPN and bridge add-ons is not guaranteed to stay end0. The stream has
-    # exactly one correct interface; say so.
+    # runs VPN and bridge add-ons is not guaranteed to stay the house LAN. The
+    # stream has exactly one correct interface; say so when it is known.
     # the speed the sink drains rather than the speed Python can loop.
     desc = (f"appsrc name=feed is-live=true format=time do-timestamp=false "
             f"block=true max-bytes={FRAME_BYTES * 30} "
             f"caps=audio/x-raw,format=S24BE,rate={RATE},channels={CH},layout=interleaved "
             f"! audioconvert ! audioresample "
             f"! rtpL24pay pt={PT} min-ptime=1000000 max-ptime=1000000 mtu=1452 "
-            f"! udpsink host={MCAST} port={PORT} multicast-iface={IFACE} "
-            f"bind-address={src} ttl-mc=16 sync=true async=false")
+            f"! udpsink host={MCAST} port={PORT} "
+            + (f"multicast-iface={iface} " if iface else "")
+            + f"bind-address={src} ttl-mc=16 sync=true async=false")
     print("[sender] pipeline:", desc, flush=True)
     pipe = Gst.parse_launch(desc)
     pipe.use_clock(clock)

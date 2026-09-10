@@ -396,6 +396,7 @@ class PanelLeg:
         self.uri = f"sip:{panel.ext}@{panel.host}:{panel.port}"
         self.to_tag = None
         self.remote_uri = self.uri            # the panel's Contact once it answers
+        self.codec = None                     # which codec it chose, once it answers
         self.remote_audio = None              # (host, port) from its SDP
         self.state = "new"                    # new | ringing | early | answered | cancelled | failed | done
         self.sock = None
@@ -437,6 +438,11 @@ class DoorCall:
         self.video = sip.pick_video(self.offer) if video_allowed else None
         audio = self.offer.get("audio") or {}
         self.door_audio = (audio.get("address"), audio.get("port")) if audio.get("port") else None
+        # Everything the door said it can send, in its order. This is what the
+        # panels get to choose from: the bridge copies audio packets rather than
+        # transcoding them, so the menu can only ever be what the door supplies.
+        self.offer_payloads = [p for p in (audio.get("payloads") or [])
+                               if p in (sip.G722, rtp.PCMU, rtp.PCMA)]
         self.state = "new"                    # new | ringing | answering | up | done
         self.started = time.time()
         self.answered_at = None
@@ -520,16 +526,17 @@ class DoorCall:
     def panel_offer(self, leg):
         b = self.bridge
         codec = self.audio_codec if self.audio_codec is not None else rtp.PCMU
+        menu = self.offer_payloads or [codec]
         sid = int(time.time())
         lines = [
             "v=0", f"o=ravabridge {sid} {sid} IN IP4 {b.address}", "s=RavaBridge",
             f"c=IN IP4 {b.address}", "t=0 0",
-            # The door's own codec, and only that: audio is copied packet for
-            # packet, never transcoded, so a panel that picked a different one
-            # would be decoding the wrong thing. G.722 is 16 kHz and a panel
-            # lists it first, which is what a doorbell should be heard in.
-            f"m=audio {leg.audio_port} RTP/AVP {codec} 101",
-            f"a=rtpmap:{codec} {sip.rtpmap_for(codec)}",
+            # Everything the door can send, in the door's order - G.722 first
+            # when it has it, since that is 16 kHz and a doorbell is worth
+            # hearing properly. A panel picks what it supports: a TSW-770R
+            # takes the G.722, an older TSW-560 takes the G.711, and both ring.
+            f"m=audio {leg.audio_port} RTP/AVP " + " ".join(str(c) for c in menu) + " 101",
+            *[f"a=rtpmap:{c} {sip.rtpmap_for(c)}" for c in menu],
             "a=rtpmap:101 telephone-event/8000", "a=fmtp:101 0-15", "a=ptime:20", "a=sendrecv",
         ]
         if self.video:
@@ -1007,6 +1014,12 @@ class Bridge:
                 a = ans.get("audio") or {}
                 if a.get("port"):
                     leg.remote_audio = (a.get("address") or leg.panel.host, a["port"])
+                # Which of the offered codecs this panel actually took. A door
+                # that can pick its encoder (ours can) needs to know.
+                for pt in a.get("payloads") or []:
+                    if pt in (sip.G722, rtp.PCMU, rtp.PCMA):
+                        leg.codec = pt
+                        break
                 # Always ACK a 2xx, on its own branch, to the panel's Contact.
                 self._request("ACK", leg.remote_uri, self._leg_dialog_headers(leg, "ACK"),
                               addr=(leg.panel.host, leg.panel.port))

@@ -179,7 +179,9 @@ class ProtectCall:
         self.done = threading.Event()
         self.answered = False
         self.ffdown = None
+        self.ffaudio = None
         self.ffup = None
+        self.rtsp_url = None
         self.audio = None
         self._sdp_tmp = None
         self.audio_pt = sip.PCMU        # until the bridge's answer says otherwise
@@ -202,9 +204,9 @@ class ProtectCall:
             # G.722 first: 16 kHz, which the panels list first too, and which is
             # the doorbell's own rate - G.711 would halve it and quantise it to
             # eight bits, which is what a doorbell sounding "digital" is.
-            f"m=audio {audio_port} RTP/AVP {sip.G722} 0 101",
+            f"m=audio {audio_port} RTP/AVP {sip.G722} 0 8 101",
             f"a=rtpmap:{sip.G722} G722/8000", "a=rtpmap:0 PCMU/8000",
-            "a=rtpmap:101 telephone-event/8000",
+            "a=rtpmap:8 PCMA/8000", "a=rtpmap:101 telephone-event/8000",
             "a=fmtp:101 0-15", "a=ptime:20", "a=sendrecv",
             f"m=video {video_port} RTP/AVP 96", "a=rtpmap:96 H264/90000",
             f"a=fmtp:96 {fmtp}", "a=sendrecv",
@@ -295,6 +297,7 @@ class ProtectCall:
                     self._start_downstream(rtsp_url, answer)
                 self.answered = True
                 self.state = "up"
+                self._start_audio()
                 self._start_talkback()
                 self.log(f"protect: {self.bell['name']} answered on a panel")
                 self._wait_for_bye(sig)
@@ -375,18 +378,46 @@ class ProtectCall:
         self.audio.bridge_audio = (a.get("address") or self.b.address, a["port"])
         for pt in a.get("payloads") or []:
             if pt in AUDIO_ENCODERS:
-                self.audio_pt = pt
+                self.audio_pt = pt          # a starting point; the panel's choice wins
                 break
-        self.log(f"protect: {self.bell['name']} audio is {sip.rtpmap_for(self.audio_pt)}")
         video = None
         if v.get("port"):
             # The bridge's c= for video may be `group/ttl`; ffmpeg wants the ttl apart.
             host = v.get("address") or self.b.address
             video = (host.split("/")[0], v["port"], host.split("/")[1] if "/" in host else "")
-        cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video,
+        self.rtsp_url = rtsp_url
+        # Video only, and now: the picture has to be up while the panels ring.
+        # Audio waits for an answer, because until one panel takes the call the
+        # bridge has nowhere to send the visitor's voice anyway - and by then we
+        # know which codec that panel chose.
+        cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video, audio=None)
+        self.ffdown = self._spawn(cmd, "ffmpeg-video")
+
+    def _panel_codec(self):
+        """Which codec the panel that answered actually took.
+
+        Read from the bridge in this same process rather than renegotiated over
+        SIP: this door and that bridge are one add-on.
+        """
+        try:
+            call = self.b.calls.get(self.call_id)
+            leg = getattr(call, "answered", None)
+            if leg is not None and getattr(leg, "codec", None) in AUDIO_ENCODERS:
+                return leg.codec
+        except Exception:
+            pass
+        return self.audio_pt
+
+    def _start_audio(self):
+        if self.ffaudio is not None or not self.rtsp_url:
+            return
+        self.audio_pt = self._panel_codec()
+        cmd = downstream_cmd(self.mgr.ffmpeg, self.rtsp_url, video=None,
                              audio=("127.0.0.1", self.audio.from_ffmpeg_port),
                              audio_pt=self.audio_pt)
-        self.ffdown = self._spawn(cmd, "ffmpeg-down")
+        self.ffaudio = self._spawn(cmd, "ffmpeg-audio")
+        self.log(f"protect: {self.bell['name']} audio is {sip.rtpmap_for(self.audio_pt)}"
+                 f" (the panel's choice)")
 
     def _start_talkback(self):
         if not self.bell.get("talkback", True):
@@ -484,7 +515,7 @@ class ProtectCall:
     def _cleanup(self):
         self.done.set()
         self._resume_face()
-        for p in (self.ffdown, self.ffup):
+        for p in (self.ffdown, self.ffaudio, self.ffup):
             if p and p.poll() is None:
                 try:
                     p.terminate()

@@ -178,9 +178,14 @@ A motion/detection trigger has a 60 s cooldown per camera; ring has 3 s.
 **The audio is G.722, not G.711.** A panel lists G.722 first among its codecs
 and a Protect doorbell records at 16 kHz, so they meet at the same rate and
 nothing is thrown away. G.711 would halve it to 8 kHz and quantise it to eight
-bits, which is what made an early build sound like a telephone. The bridge
-copies audio packets rather than transcoding them, so the panel is offered
-exactly the codec the door is sending and nothing else.
+bits, which is what made an early build sound like a telephone. The bridge copies audio
+packets rather than transcoding them, so the panel is offered exactly the set
+the door can send - G.722 first, then G.711 - and picks from it. That matters
+in a mixed house: a TSW-770R takes the G.722, an older TSW-560 answers 488 Not
+Acceptable Here to a G.722-only offer and takes the G.711 instead. Once a panel
+has answered, the doorbell's encoder starts on whichever it chose, which is
+also why the audio starts at answer while the picture starts while ringing -
+until somebody answers there is nowhere to send a visitor's voice anyway.
 
 **A doorbell stops reading faces while you are talking to it.** Left alone it
 goes on recognising the visitor for the whole conversation, granting or denying
