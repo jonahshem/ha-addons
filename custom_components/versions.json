@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-14T20:17:54Z",
+  "generated": "2026-09-14T20:19:55Z",
   "base": "https://raw.githubusercontent.com/jonahshem/ha-addons/main/custom_components",
   "integrations": {
     "crestron_home": {

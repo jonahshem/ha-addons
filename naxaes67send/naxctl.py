@@ -362,7 +362,7 @@ class Nax:
         thing being asked is whether it has been cleared."""
         return (self.routes.get(zone) or "") == (source or "")
 
-    def route_all(self, wanted, attempts=ATTEMPTS, settle=SETTLE):
+    def route_all(self, wanted, attempts=ATTEMPTS, settle=SETTLE, on_landed=None):
         """Write a set of routes until they hold. {zone: source} in,
         {zone: writes or None} out.
 
@@ -407,6 +407,16 @@ class Nax:
                 writes[zone] += 1
                 if self._lands(zone, wanted[zone], settle):
                     landed.append(zone)
+                    # The moment the route is in, before the settle: an idle
+                    # zone has just turned on and taken its DefaultVolume, and
+                    # the caller has ~1.5 s before audio starts to put the
+                    # level back. After the settle would be too late for the
+                    # first half-second of a chime.
+                    if on_landed is not None:
+                        try:
+                            on_landed(zone)
+                        except Exception as e:
+                            self.log(f"[nax] {self.host} {zone}: on_landed failed ({e})")
             # One watch for everything that landed this round.
             deadline = time.time() + settle
             cleared = set()
@@ -692,8 +702,23 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                 room = (was_all.get(zone, {}).get("name") or "").strip().lower()
                 if room in playing_rooms:
                     resume[(host, zone)] = playing_rooms[room]
+            def relevel(zone, nax=nax, host=host, was_all=was_all):
+                # The zone has just turned on (if it was idle) and reset to its
+                # default. Back to the announcement level - or to what the room
+                # had if that was louder: a loud room is left loud, never
+                # turned down for a page.
+                level = level_for(zone)
+                if not level:
+                    return
+                had = (was_all.get(zone) or {}).get("volume")
+                target = max(level, had or 0)
+                volumes.setdefault((host, zone), had)
+                nax.set_volume(zone, target)
+                log(f"[nax] {host} {zone}: route landed, volume set to {target} "
+                    f"(was {had}, announce at {level})")
+
             # All of this amplifier's zones together - see `route_all`.
-            for zone, n in nax.route_all({z: source for z in taking}).items():
+            for zone, n in nax.route_all({z: source for z in taking}, on_landed=relevel).items():
                 if n is None:
                     log(f"[nax] {host} {zone}: {source} would not bind")
                     refused.append(f"{host}:{zone}")
