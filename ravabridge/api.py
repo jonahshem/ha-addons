@@ -61,7 +61,9 @@ async function load(){
   document.getElementById('doors').innerHTML='<tr><th>Name</th><th>User</th><th>Registered</th><th>Rings</th><th>Unlock</th></tr>'+d.doors.map(x=>{const r=d.registered[x.user];return `<tr><td>${esc(x.name)}</td><td>${esc(x.user)}</td><td>${r?'<span class=ok>yes, from '+esc(r.from)+' ('+r.expiresIn+' s)</span>':'<span class=bad>no</span>'}</td><td>${esc((x.ring||[]).join(', '))}</td><td>${x.doorId?'<button onclick="act(\\'unlock?door='+encodeURIComponent(x.name)+'\\')">Unlock</button>':'<span class=muted>no door id</span>'}</td></tr>`}).join('')||'<tr><td class="muted">none yet</td></tr>';
   document.getElementById('calls').innerHTML='<tr><th>Door</th><th>State</th><th>Answered by</th><th>Video in/out</th><th>Legs</th></tr>'+d.calls.slice(-5).reverse().map(c=>`<tr><td>${esc(c.door)}</td><td>${esc(c.state)}${c.why?' · '+esc(c.why):''}</td><td>${esc(c.answeredBy||'')}</td><td>${c.videoIn}/${c.videoOut}</td><td>${esc((c.legs||[]).map(l=>l.panel+': '+l.state).join(', '))}</td></tr>`).join('')||'<tr><td class="muted">none</td></tr>';
   document.getElementById('events').textContent=d.events.map(e=>new Date(e.t*1000).toLocaleTimeString()+'  '+e.text).join('\\n');
-  if(d.discovery&&d.discovery.readerSetup){const s=d.discovery.readerSetup;document.getElementById('setup').innerHTML='In the Access app: '+esc(s.where)+'<br>Server <b>'+esc(s.server)+'</b>, port <b>'+s.port+'</b>, '+esc(s.transport)+'.<br>'+s.accounts.map(a=>'Reader <b>'+esc(a.reader)+'</b>: user <b>'+esc(a.user)+'</b>, password <b>'+esc(a.password)+'</b>').join('<br>');}
+  const ae=d.discovery&&d.discovery.access;
+  if(ae&&ae.ok===false){document.getElementById('setup').innerHTML='<span class="bad">UniFi Access: '+esc(ae.error)+'</span>'+(ae.hint?'<br>'+esc(ae.hint):'');}
+  else if(d.discovery&&d.discovery.readerSetup){const s=d.discovery.readerSetup;document.getElementById('setup').innerHTML='In the Access app: '+esc(s.where)+'<br>Server <b>'+esc(s.server)+'</b>, port <b>'+s.port+'</b>, '+esc(s.transport)+'.<br>'+s.accounts.map(a=>'Reader <b>'+esc(a.reader)+'</b>: user <b>'+esc(a.user)+'</b>, password <b>'+esc(a.password)+'</b>').join('<br>');}
 }
 async function act(p){document.getElementById('msg').textContent='…';const r=await fetch(p,{method:'POST'});let t;try{t=await r.json()}catch(e){t={status:r.status}}
   document.getElementById('msg').textContent=JSON.stringify(t).slice(0,240);load();}
@@ -194,6 +196,7 @@ class Handler(BaseHTTPRequestHandler):
             st = BRIDGE.status()
             st["discovery"] = {"at": LAST_DISCOVERY["at"],
                                "readerSetup": (LAST_DISCOVERY["report"] or {}).get("readerSetup"),
+                               "access": (LAST_DISCOVERY["report"] or {}).get("access"),
                                "error": (LAST_DISCOVERY["report"] or {}).get("error"),
                                "supervisor": dict(discover.SUPERVISOR_STATE)}
             crpc_mgr = getattr(BRIDGE, "crpc", None)

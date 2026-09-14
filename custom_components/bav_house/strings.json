@@ -70,8 +70,8 @@
         },
         "data_description": {
           "unifi_host": "The UDM or console, for example 192.168.0.1.",
-          "protect_api_key": "Protect app → Settings → Control Plane → Integrations.",
-          "access_token": "Only needed if a door should unlock from a panel.",
+          "protect_api_key": "Protect app → Settings → Control Plane → Integrations. Not the same thing as the Access token below.",
+          "access_token": "A UniFi Access API token, made in the Access application under Settings → Advanced → API Token, with device and door permissions. Not the Protect key — they are different credentials even on the same console, and the Protect key is refused. Needed for door discovery and for unlocking from a panel.",
           "nax_host": "For example 192.168.0.51. Its zones are read off the device afterwards.",
           "nax_password": "Defaults to the common device PIN entered earlier."
         }

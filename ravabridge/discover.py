@@ -149,14 +149,46 @@ def access_get(host, token, path, timeout=10):
         return json.load(r)
 
 
+# What the last Access scan learned about the token, kept the same way
+# SUPERVISOR_STATE is below: `/status` shows it, so a refused token is visible
+# on the add-on's own page rather than only in a log nobody reads.
+ACCESS_STATE = {"ok": None, "error": None, "hint": None}
+
+REFUSED_HINT = ("the Access API refused this token. It needs a UniFi Access API token - "
+                "a UniFi Protect API key is a different credential and does not work here, "
+                "even on the same console. Make one in the Access application under "
+                "Settings > Advanced > API Token, with device and door permissions.")
+
+
 def scan_doors(host, token, log=None):
-    """Every UniFi Access reader that can do third-party SIP, as a door entry."""
+    """Every UniFi Access reader that can do third-party SIP, as a door entry.
+
+    🔴 An empty list is not an answer on its own. A token the Access API refuses
+    used to come back as the same [] as "no SIP-capable readers" - and a UniFi
+    Protect API key IS refused; it is a different credential for a different
+    service on the same console. At 110 Roosevelt the Protect key had been
+    pasted into `access.token`, every call was a 401, and the report said
+    "0 doors, no error" for an afternoon. The failure is recorded in
+    ACCESS_STATE and surfaced by the report and the page.
+    """
     try:
         devs = access_get(host, token, "/devices")
         doors = access_get(host, token, "/doors")
-    except Exception as e:
-        _log(log, f"UniFi Access at {host}: {e!r}")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read()[:200].decode("utf-8", "replace")
+        except Exception:
+            pass
+        ACCESS_STATE.update(ok=False, error=f"HTTP {e.code} from UniFi Access at {host}: {body}".strip(),
+                            hint=REFUSED_HINT if e.code in (401, 403) else None)
+        _log(log, f"UniFi Access: {ACCESS_STATE['error']}")
         return []
+    except Exception as e:
+        ACCESS_STATE.update(ok=False, error=f"UniFi Access at {host}: {e!r}", hint=None)
+        _log(log, ACCESS_STATE["error"])
+        return []
+    ACCESS_STATE.update(ok=True, error=None, hint=None)
     flat = []
     for grp in devs.get("data") or []:
         flat.extend(grp if isinstance(grp, list) else [grp])
@@ -206,13 +238,21 @@ def merge(options, panels, details, doors, pin):
             existing.setdefault("hostname", f["hostname"])
             if json.dumps(existing, sort_keys=True) != before:
                 changed.append(f"panel {existing.get('name')} refreshed")
-    users = {d.get("user") for d in options.get("doors") or []}
+    def slug(s):
+        return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
     for f in doors:
-        if f["user"] in users:
-            for d in options["doors"]:
-                if d.get("user") == f["user"] and not d.get("door_id") and f.get("door_id"):
-                    d["door_id"] = f["door_id"]
-                    changed.append(f"door {d.get('name')} learned its Access door id")
+        # A door somebody typed in by hand is matched by its account name OR by
+        # its name. Only by account name, a door called "FrontGate" with the
+        # account "admin" never learned its Access door id: the reader's alias
+        # slugs to "frontgate", that is not "admin", and discovery added a
+        # second, duplicate door instead of completing the first.
+        match = next((d for d in options.get("doors") or []
+                      if d.get("user") == f["user"] or slug(d.get("name")) == slug(f["name"])), None)
+        if match is not None:
+            if not match.get("door_id") and f.get("door_id"):
+                match["door_id"] = f["door_id"]
+                changed.append(f"door {match.get('name')} learned its Access door id")
             continue
         options.setdefault("doors", []).append({
             "name": f["name"], "user": f["user"], "password": pin, "host": "", "ring": ["all"],
@@ -311,6 +351,9 @@ def run(cfg, bind_ip, log=None, apply=None):
     if acc.get("host") and acc.get("token"):
         doors = scan_doors(acc["host"], acc["token"], log=log)
         report["doors"] = doors
+        # Whether the Access API actually answered. Without this, a refused
+        # token and "no SIP-capable readers" were the same empty list.
+        report["access"] = dict(ACCESS_STATE)
         report["readerSetup"] = {
             "where": "Access app > Interface Designer > reader > Doorbell Call > Third-Party SIP > Configure",
             "server": bind_ip, "port": int(cfg.get("sip_port") or 5060), "transport": "UDP",
