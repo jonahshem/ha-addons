@@ -1,5 +1,5 @@
 name: Rava Bridge
-version: "0.11.1"
+version: "0.12.0"
 slug: ravabridge
 description: A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup
 arch: [aarch64, amd64]
@@ -92,6 +92,12 @@ options:
     host: ""
     api_key: ""
     autodetect: true
+    # A G6 doorbell streams H.265, which the Crestron panels cannot show: they
+    # ring with audio and a black picture. With this on (the default) the add-on
+    # checks each camera's stream before ringing and turns H.265 into H.264 for
+    # the panels, at some CPU. Turn it off only on a house whose cameras are set
+    # to H.264 in Protect.
+    transcode_hevc: true
     # Log every event the console sends (type + camera). The way to watch triggers without ringing.
     debug: false
     ring: ["all"]
@@ -183,6 +189,7 @@ schema:
     host: str?
     api_key: password?
     autodetect: bool?
+    transcode_hevc: bool?
     debug: bool?
     face_check_seconds: int?
     face_max_seconds: int?

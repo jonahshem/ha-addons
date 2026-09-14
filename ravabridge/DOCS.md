@@ -291,3 +291,20 @@ script started outside it never sees the variable. Without that, discovery
 finds the house but cannot write what it found into the options; it then
 keeps its findings in `/data/discovered.json` and folds them in at start, so
 the house still rings after a restart either way.
+
+## A G6 doorbell rings with audio and a black picture
+
+Every UniFi G6 camera streams **H.265**. The panels only take H.264, and the
+bridge used to copy the camera's video untouched while the offer to the panels
+said H.264 - so the visitor could be heard and not seen, on every panel, and
+`/protectprobe` still said `ok` because it only counted packets.
+
+Since 0.12.0 the bridge asks the camera what it streams (one RTSP `DESCRIBE`)
+before it rings anything. H.264 is still copied. H.265 is transcoded to H.264
+Baseline, 360p at 15 fps, which a 1280x800 panel shows perfectly well and a
+Raspberry Pi manages live. The log says which happened, and `/protectprobe`
+now reports `videoCodec` and `transcoded`.
+
+`protect.transcode_hevc: false` turns that off - only for a house that has
+set its cameras to H.264 in Protect and would rather not spend the CPU. With it
+off, an H.265 camera is logged as "NO PICTURE" rather than left to look fine.

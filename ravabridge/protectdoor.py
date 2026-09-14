@@ -38,6 +38,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 
 import protect
 import rtp
@@ -69,8 +70,73 @@ def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "protect-door"
 
 
-def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None, audio_pt=0):
-    """The ffmpeg that carries a camera: video copied as-is, audio to G.711.
+def _rtsp_complete(buf):
+    head, sep, body = buf.partition(b"\r\n\r\n")
+    if not sep:
+        return False
+    m = re.search(rb"content-length:\s*(\d+)", head, re.I)
+    return len(body) >= int(m.group(1)) if m else True
+
+
+def describe_video(rtsp_url, timeout=5):
+    """What the camera's stream actually carries: one RTSP DESCRIBE, no media.
+
+    🔴 `-c:v copy` ships whatever Protect sends, and the offer to the panels is
+    hard-wired to H264/90000. A G6 Entry's only enabled stream is H.265
+    (measured at 110 Roosevelt, 2026-09-14: `a=rtpmap:97 H265/90000`), so the
+    panels rang with perfect audio and a black picture - on every panel, new or
+    old - and the probe said ok, because it only counts packets. Three lines of
+    text over TCP settle it before anything rings.
+
+    Returns {"codec": "H264" | "H265" | ..., "fmtp": str | None}; codec is None
+    if the DESCRIBE failed, and the caller then copies as it always did.
+    """
+    out = {"codec": None, "fmtp": None}
+    try:
+        p = urllib.parse.urlparse(rtsp_url)
+        with socket.create_connection((p.hostname, p.port or 554), timeout=timeout) as sk:
+            sk.settimeout(timeout)
+            sk.sendall((f"DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: 1\r\n"
+                        f"Accept: application/sdp\r\nUser-Agent: RavaBridge\r\n\r\n").encode())
+            buf = b""
+            while not _rtsp_complete(buf):
+                chunk = sk.recv(65535)
+                if not chunk:
+                    break
+                buf += chunk
+    except Exception as e:
+        out["error"] = repr(e)
+        return out
+    in_video, pt = False, None
+    for line in buf.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line.startswith("m="):
+            in_video = line.startswith("m=video")
+            parts = line.split()
+            pt = parts[3] if in_video and len(parts) > 3 else None
+        elif in_video and line.startswith("a=rtpmap:") and (pt is None or line.startswith(f"a=rtpmap:{pt} ")):
+            out["codec"] = line.split(" ", 1)[1].split("/")[0].upper()
+        elif in_video and line.startswith("a=fmtp:") and (pt is None or line.startswith(f"a=fmtp:{pt} ")):
+            out["fmtp"] = line.split(" ", 1)[1]
+    return out
+
+
+# H.264 the panels will take, made from a stream they will not. Baseline 3.1 is
+# what the offer promises them; 360p at 15 fps is plenty for a 1280x800 panel
+# looking at a visitor, and cheap enough that a Pi does it live. `repeat-headers`
+# puts SPS/PPS in-band at every keyframe, which is how a panel that joins the
+# multicast mid-stream ever gets a first picture.
+TRANSCODE_VIDEO = ["-vf", "scale=-2:360", "-r", "15",
+                   "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                   "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p",
+                   "-g", "15", "-keyint_min", "15",
+                   "-b:v", "700k", "-maxrate", "700k", "-bufsize", "350k",
+                   "-x264-params", "repeat-headers=1:sliced-threads=1:sync-lookahead=0:rc-lookahead=0"]
+
+
+def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None, audio_pt=0, transcode=False):
+    """The ffmpeg that carries a camera: video copied as-is - or made into H.264
+    when the source is something the panels cannot show - and audio to G.711.
 
     `video` and `audio` are (host, port) - or (host, port, ttl) for a multicast
     video target. One function, so a probe exercises exactly what a call runs.
@@ -78,7 +144,8 @@ def downstream_cmd(ffmpeg, rtsp_url, video=None, audio=None, audio_pt=0):
     outs = []
     if video:
         ttl = f"&ttl={video[2]}" if len(video) > 2 and video[2] else ""
-        outs += ["-map", "0:v:0", "-c:v", "copy", "-an", "-payload_type", "96",
+        codec = TRANSCODE_VIDEO if transcode else ["-c:v", "copy"]
+        outs += ["-map", "0:v:0", *codec, "-an", "-payload_type", "96",
                  "-f", "rtp", f"rtp://{video[0]}:{video[1]}?pkt_size=1200{ttl}"]
     if audio:
         enc, rate = AUDIO_ENCODERS.get(audio_pt, AUDIO_ENCODERS[0])
@@ -192,6 +259,8 @@ class ProtectCall:
         self._sdp_tmp = None
         self.audio_pt = sip.PCMU        # until the bridge's answer says otherwise
         self._face_restore = None
+        self.video = {"codec": None}    # what DESCRIBE said the stream carries
+        self.transcode = False          # H.265 in, H.264 out
         self.state = "new"
 
     # -- SIP UAC over loopback --------------------------------------------
@@ -236,6 +305,23 @@ class ProtectCall:
         if not rtsp_url:
             self.log(f"protect call {self.bell['name']}: the doorbell has no RTSP stream and one could not be enabled")
             return
+        # 1b) What that stream actually carries. A G6 Entry's is H.265, which no
+        # panel will show and which the offer below does not even claim to send.
+        self.video = describe_video(rtsp_url)
+        codec = self.video.get("codec")
+        if codec == "H265":
+            if self.mgr.transcode_hevc:
+                self.transcode = True
+                self.log(f"protect: {self.bell['name']} streams H.265 - transcoding to H.264 for the "
+                         f"panels (set the camera to H.264 in Protect to spare the CPU)")
+            else:
+                self.log(f"protect: {self.bell['name']} streams H.265 and transcode_hevc is off - "
+                         f"the panels will ring with NO PICTURE")
+        elif codec and codec != "H264":
+            self.log(f"protect: {self.bell['name']} streams {codec}, which the panels may not show")
+        elif not codec:
+            self.log(f"protect: {self.bell['name']}: could not read the stream's codec "
+                     f"({self.video.get('error')}); copying as-is")
         # 2) The SIP call into our own bridge.
         sig = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sig.bind(("127.0.0.1", 0))
@@ -396,7 +482,8 @@ class ProtectCall:
         # Audio waits for an answer, because until one panel takes the call the
         # bridge has nowhere to send the visitor's voice anyway - and by then we
         # know which codec that panel chose.
-        cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video, audio=None)
+        cmd = downstream_cmd(self.mgr.ffmpeg, rtsp_url, video=video, audio=None,
+                             transcode=self.transcode)
         self.ffdown = self._spawn(cmd, "ffmpeg-video")
 
     def _panel_codec(self):
@@ -588,6 +675,10 @@ class ProtectDoors:
         self.ring_seconds = int(pc.get("ring_seconds") or bridge.ring_seconds or 60)
         self.max_call_seconds = int(pc.get("max_call_seconds") or 3600)
         self.ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        # H.265 doorbells - every G6 - are transcoded to H.264 for the panels
+        # unless a house turns this off, say one that has switched its cameras
+        # to H.264 in Protect and would rather not spend the CPU checking.
+        self.transcode_hevc = bool(pc.get("transcode_hevc", True))
         # Whether this build has the limiter the talkback gain wants. Checked once,
         # because finding out during a call means a call with no talkback at all.
         self.has_limiter = False
@@ -1048,6 +1139,8 @@ class ProtectDoors:
             return {"error": f"could not get an RTSP stream: {e}"}
         if not url:
             return {"error": "the camera has no RTSP stream and one could not be enabled"}
+        info = describe_video(url)
+        transcode = info.get("codec") == "H265" and self.transcode_hevc
 
         socks = {}
         for kind in ("video", "audio"):
@@ -1062,7 +1155,7 @@ class ProtectDoors:
         cmd = downstream_cmd(self.ffmpeg, url,
                              video=("127.0.0.1", socks["video"].getsockname()[1]),
                              audio=("127.0.0.1", socks["audio"].getsockname()[1]),
-                             audio_pt=pt)
+                             audio_pt=pt, transcode=transcode)
         stats = {k: {"packets": 0, "bytes": 0, "pt": None, "first": None, "last": None,
                      "gaps": 0, "prev": None} for k in socks}
         errs = []
@@ -1127,7 +1220,18 @@ class ProtectDoors:
                 pass
 
         out = {"camera": entry["name"], "quality": quality, "seconds": seconds,
-               "codec": sip.rtpmap_for(pt), "rang": False, "ffmpegErrors": errs[-4:]}
+               "codec": sip.rtpmap_for(pt), "rang": False, "ffmpegErrors": errs[-4:],
+               # The video codec the camera sends, and whether it was turned into
+               # H.264 on the way. A probe that said "ok" about an H.265 stream
+               # the panels could not show is how this was found the slow way.
+               "videoCodec": info.get("codec"), "videoFmtp": info.get("fmtp"),
+               "transcoded": bool(transcode)}
+        if info.get("codec") == "H265" and not transcode:
+            out["warning"] = ("this stream is H.265 and transcode_hevc is off: the panels "
+                              "will show no picture. Set the camera to H.264 in Protect, "
+                              "or turn transcode_hevc back on.")
+        elif info.get("codec") == "H265":
+            out["note"] = "H.265 source, transcoded to H.264 Baseline 360p for the panels"
         for kind, st in stats.items():
             span = (st["last"] - st["first"]) if st["first"] and st["last"] and st["last"] > st["first"] else 0
             out[kind] = {"packets": st["packets"], "bytes": st["bytes"], "payloadType": st["pt"],
