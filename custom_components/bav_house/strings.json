@@ -57,6 +57,24 @@
         "data": {
           "addons": "Add-ons"
         }
+      },
+      "devices": {
+        "title": "The house's own kit",
+        "description": "All optional — leave anything blank that this house does not have, or that is not installed yet. These go straight into the add-ons that need them, so nobody has to paste them in afterwards.\n\nProtect and Access share one UniFi console address.",
+        "data": {
+          "unifi_host": "UniFi console address",
+          "protect_api_key": "UniFi Protect API key",
+          "access_token": "UniFi Access API token",
+          "nax_host": "DM-NAX amplifier address",
+          "nax_password": "Amplifier password"
+        },
+        "data_description": {
+          "unifi_host": "The UDM or console, for example 192.168.0.1.",
+          "protect_api_key": "Protect app → Settings → Control Plane → Integrations.",
+          "access_token": "Only needed if a door should unlock from a panel.",
+          "nax_host": "For example 192.168.0.51. Its zones are read off the device afterwards.",
+          "nax_password": "Defaults to the common device PIN entered earlier."
+        }
       }
     },
     "error": {

@@ -172,15 +172,24 @@ class Supervisor:
                          timeout=INSTALL_TIMEOUT)
 
     async def set_options(self, slug: str, options: dict) -> None:
-        """Merge `options` into the add-on's current options.
+        """Merge `options` into the add-on's current options, nested dicts too.
 
         Merge, never replace: a house that has been tuned by hand - zone
         volumes, a panel somebody typed in - must not lose that because it was
         re-commissioned. Only the keys given here are touched.
+
+        🔴 The merge has to reach INSIDE nested dicts. `ravabridge` keeps
+        `protect: {host, api_key, cameras: [...], doorbells: [...]}`, and its
+        auto-detect fills those lists in. A top-level merge writing
+        `{"protect": {"host": ..., "api_key": ...}}` replaces the whole block
+        and throws every discovered camera away - and the add-on would come
+        back up looking fine, with nothing to ring.
+
+        Lists are replaced, not merged: merging two lists of records has no
+        single sensible answer, so only pass a list when you mean to set it.
         """
         current = (await self.info(slug)).get("options") or {}
-        merged = dict(current)
-        merged.update(options)
+        merged = _deep_merge(current, options)
         if merged == current:
             return
         await self._call("POST", f"/addons/{slug}/options", {"options": merged})
@@ -197,6 +206,17 @@ class Supervisor:
 
     async def restart(self, slug: str) -> None:
         await self._call("POST", f"/addons/{slug}/restart", timeout=300)
+
+
+def _deep_merge(base: dict, extra: dict) -> dict:
+    """`base` updated by `extra`, recursing into dicts and replacing the rest."""
+    out = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
 
 
 async def _read_json(resp: aiohttp.ClientResponse) -> dict:

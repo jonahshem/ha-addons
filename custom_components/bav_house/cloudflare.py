@@ -25,8 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 API = "https://api.cloudflare.com/client/v4"
 TIMEOUT = aiohttp.ClientTimeout(total=30)
 
-# Home Assistant as the cloudflared container sees it. The add-on shares Core's
-# Docker network, where Core answers to this name.
+# Only a last resort. 🔴 Home Assistant does NOT always answer on 8123: on
+# HAOS 18.2 with Core 2026.9 a house answers on 80 and 8123 merely redirects.
+# A tunnel pointed at the wrong port is a *healthy* tunnel serving 502, which
+# reads as a Cloudflare fault and is not one. `provision.ha_origin` asks Home
+# Assistant what it actually bound; this is used only if that cannot answer.
 HA_SERVICE = "http://homeassistant:8123"
 
 
@@ -130,7 +133,8 @@ class Cloudflare:
         rules = config.get("ingress")
         return list(rules) if isinstance(rules, list) else []
 
-    async def set_ingress(self, tunnel_id: str, hostname: str) -> str:
+    async def set_ingress(self, tunnel_id: str, hostname: str,
+                          service: str | None = None) -> str:
         """Route `hostname` at Home Assistant, leaving every other rule alone.
 
         🔴 A tunnel's configuration is written WHOLE - there is no per-rule
@@ -144,6 +148,7 @@ class Cloudflare:
         (preserving whatever the catch-all already was - it is not always a
         404).
         """
+        service = service or HA_SERVICE
         existing = await self.get_ingress(tunnel_id)
         kept, catch_all = [], {"service": "http_status:404"}
         for rule in existing:
@@ -153,13 +158,13 @@ class Cloudflare:
                 continue
             if rule.get("hostname") != hostname:
                 kept.append(rule)
-        ours = {"hostname": hostname, "service": HA_SERVICE, "originRequest": {}}
+        ours = {"hostname": hostname, "service": service, "originRequest": {}}
         rules = [*kept, ours, catch_all]
         await self._call(
             "PUT", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations",
             {"config": {"ingress": rules}},
         )
-        return f"{len(kept)} other route(s) kept"
+        return f"-> {service}, {len(kept)} other route(s) kept"
 
     # -- dns -------------------------------------------------------------
 

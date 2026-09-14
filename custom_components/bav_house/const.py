@@ -65,6 +65,15 @@ CONF_CF_ZONE = "cf_zone"
 CONF_CF_TUNNEL_NAME = "cf_tunnel_name"
 CONF_CHANGE_CF = "change_cloudflare"
 
+# The house's own kit. All optional: a house may have a doorbell and no
+# amplifier, or neither. Protect and Access live on the same UniFi console in
+# every house this dealer runs, so one address serves both.
+CONF_UNIFI_HOST = "unifi_host"
+CONF_PROTECT_API_KEY = "protect_api_key"
+CONF_ACCESS_TOKEN = "access_token"
+CONF_NAX_HOST = "nax_host"
+CONF_NAX_PASSWORD = "nax_password"
+
 # Provisioning state, persisted on the config entry so that a run interrupted by
 # a restart resumes rather than starting over.
 STATE_STEPS = "steps_done"

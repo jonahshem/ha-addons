@@ -27,6 +27,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .cloudflare import Cloudflare, CloudflareError
 from .const import (
     ADDON_CHOICES,
+    ADDON_NAX_SENDER,
+    ADDON_RAVA_BRIDGE,
+    CONF_ACCESS_TOKEN,
+    CONF_NAX_HOST,
+    CONF_NAX_PASSWORD,
+    CONF_PROTECT_API_KEY,
+    CONF_UNIFI_HOST,
     CONF_ADDONS,
     CONF_CF_ACCOUNT_ID,
     CONF_CF_API_TOKEN,
@@ -260,8 +267,7 @@ class BavHouseFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_addons(self, user_input=None):
         if user_input is not None:
             self._data[CONF_ADDONS] = user_input.get(CONF_ADDONS) or []
-            return self.async_create_entry(
-                title=self._data[CONF_SITE_NAME], data=self._data)
+            return await self.async_step_devices()
 
         options = [selector.SelectOptionDict(value=slug, label=label)
                    for slug, label, _ in ADDON_CHOICES]
@@ -274,6 +280,48 @@ class BavHouseFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                               mode=selector.SelectSelectorMode.LIST)),
         })
         return self.async_show_form(step_id="addons", data_schema=schema)
+
+    async def async_step_devices(self, user_input=None):
+        """The house's own kit, asked for only where an add-on needs it.
+
+        Everything here is optional - a house may have a doorbell and no
+        amplifier, or neither - but asking now is the whole point: without it
+        somebody has to open each add-on's own configuration afterwards and
+        paste these in by hand, which is exactly the job this replaces.
+        """
+        chosen = set(self._data.get(CONF_ADDONS) or [])
+        wants_unifi = ADDON_RAVA_BRIDGE in chosen
+        wants_nax = ADDON_NAX_SENDER in chosen
+        if not (wants_unifi or wants_nax):
+            return self._finish()
+
+        if user_input is not None:
+            for key in (CONF_UNIFI_HOST, CONF_PROTECT_API_KEY, CONF_ACCESS_TOKEN,
+                        CONF_NAX_HOST, CONF_NAX_PASSWORD):
+                self._data[key] = (user_input.get(key) or "").strip()
+            return self._finish()
+
+        fields = {}
+        if wants_unifi:
+            fields[vol.Optional(CONF_UNIFI_HOST, default="")] = str
+            fields[vol.Optional(CONF_PROTECT_API_KEY, default="")] = \
+                selector.TextSelector(selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD))
+            fields[vol.Optional(CONF_ACCESS_TOKEN, default="")] = \
+                selector.TextSelector(selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD))
+        if wants_nax:
+            fields[vol.Optional(CONF_NAX_HOST, default="")] = str
+            fields[vol.Optional(CONF_NAX_PASSWORD,
+                                default=self._data.get(CONF_DEVICE_PIN, ""))] = \
+                selector.TextSelector(selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD))
+        return self.async_show_form(step_id="devices",
+                                    data_schema=vol.Schema(fields))
+
+    def _finish(self):
+        return self.async_create_entry(
+            title=self._data[CONF_SITE_NAME], data=self._data)
 
     @staticmethod
     @callback

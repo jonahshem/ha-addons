@@ -20,7 +20,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .cloudflare import Cloudflare, CloudflareError
+from .cloudflare import HA_SERVICE as CF_HA_SERVICE, Cloudflare, CloudflareError
 from .const import (
     ADDON_CLOUDFLARED,
     ADDON_NAX_PROBE,
@@ -35,8 +35,13 @@ from .const import (
     CONF_CF_ZONE,
     CONF_CRESTRON_HOST,
     CONF_CRESTRON_TOKEN,
+    CONF_ACCESS_TOKEN,
     CONF_DEVICE_PIN,
     CONF_HOSTNAME,
+    CONF_NAX_HOST,
+    CONF_NAX_PASSWORD,
+    CONF_PROTECT_API_KEY,
+    CONF_UNIFI_HOST,
     CRESTRON_DOMAIN,
     DEFAULT_DEVICE_PIN,
     STATE_STEPS,
@@ -91,14 +96,62 @@ def addon_options(slug: str, cfg: dict, tunnel_token: str | None) -> dict:
         if tunnel_token:
             options["tunnel_token"] = tunnel_token
         return options
+    unifi = (cfg.get(CONF_UNIFI_HOST) or "").strip()
     if slug == ADDON_NAX_SENDER:
-        return {"api_token": pin, "crpc_host": processor, "crpc_pin": pin}
+        options = {"api_token": pin, "crpc_host": processor, "crpc_pin": pin}
+        # Only when an amplifier was actually given. Writing an empty list over
+        # a house that already has amplifiers would silence it.
+        nax_host = (cfg.get(CONF_NAX_HOST) or "").strip()
+        if nax_host:
+            options["amps"] = [{
+                "host": nax_host,
+                "user": "admin",
+                "password": cfg.get(CONF_NAX_PASSWORD) or pin,
+            }]
+        return options
     if slug == ADDON_RAVA_BRIDGE:
-        return {"panel_password": pin, "api_token": pin,
-                "crpc": {"host": processor, "pin": pin}}
+        options = {"panel_password": pin, "api_token": pin,
+                   "crpc": {"host": processor, "pin": pin}}
+        # `set_options` merges into these rather than replacing them, so the
+        # cameras and doorbells auto-detect has already found survive.
+        protect_key = (cfg.get(CONF_PROTECT_API_KEY) or "").strip()
+        if unifi and protect_key:
+            options["protect"] = {"host": unifi, "api_key": protect_key}
+        access_token = (cfg.get(CONF_ACCESS_TOKEN) or "").strip()
+        if unifi and access_token:
+            options["access"] = {"host": unifi, "token": access_token}
+        return options
     if slug == ADDON_NAX_PROBE:
         return {}
     return {}
+
+
+def ha_origin(hass: HomeAssistant) -> str:
+    """Where cloudflared should send this house's traffic.
+
+    🔴 Never a hardcoded port. Home Assistant does not always answer on 8123 -
+    on HAOS 18.2 with Core 2026.9 the house answers on **80** and 8123 only
+    redirects - and a tunnel pointed at the wrong port is a HEALTHY tunnel
+    serving 502 Bad Gateway. That reads as a Cloudflare problem and is not one,
+    which is exactly how long it took to find the first time.
+
+    `hass.config.api` is what the HTTP server actually bound, so it is right
+    whatever the version does. `local_ip` rather than the `homeassistant`
+    container name because an explicit address is what every working house in
+    this fleet already uses, and it does not depend on add-on DNS.
+    """
+    # Defensive all the way down: this runs in the middle of a commissioning
+    # run, and an AttributeError here would abort the whole thing over a
+    # cosmetic detail.
+    api = getattr(getattr(hass, "config", None), "api", None)
+    port = getattr(api, "port", None)
+    if port:
+        scheme = "https" if getattr(api, "use_ssl", False) else "http"
+        host = getattr(api, "local_ip", None) or "homeassistant"
+        return f"{scheme}://{host}:{port}"
+    _LOGGER.warning("bav_house: Home Assistant did not report its own HTTP "
+                    "port; falling back to %s", CF_HA_SERVICE)
+    return CF_HA_SERVICE
 
 
 async def run(hass: HomeAssistant, entry: ConfigEntry, progress: Progress) -> None:
@@ -218,7 +271,7 @@ async def _cloudflare(hass: HomeAssistant, cfg: dict,
     tunnel_id, token = await cf.ensure_tunnel(name)
     progress.say(STEP_CLOUDFLARE, "ok", f"tunnel {name} ({tunnel_id[:8]}…)")
     if hostname:
-        kept = await cf.set_ingress(tunnel_id, hostname)
+        kept = await cf.set_ingress(tunnel_id, hostname, ha_origin(hass))
         progress.say(STEP_CLOUDFLARE, "ok", f"{hostname} routed, {kept}")
         zone = cfg.get(CONF_CF_ZONE) or hostname.split(".", 1)[-1]
         what = await cf.ensure_cname(zone, hostname, tunnel_id)
