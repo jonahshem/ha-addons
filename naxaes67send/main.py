@@ -4,8 +4,16 @@ import os
 import threading
 
 import api
+import clips
 import discover
 import sender
+
+# The shipped announcements, into the house's folder, once each. Before the
+# API is up so the driver's first poll already sees them.
+try:
+    clips.seed_bundled(log=api.log)
+except Exception as e:
+    api.log(f"[clips] seeding the bundled announcements failed: {e!r}")
 
 pipe = sender.build()
 threading.Thread(target=api.serve, daemon=True).start()

@@ -29,6 +29,11 @@ import subprocess
 import unicodedata
 
 CLIPS_DIR = os.environ.get("CLIPS_DIR", "/share/nax-announcements")
+# The set every house starts with, shipped in the image. Seeded into
+# CLIPS_DIR once; a clip a person then deletes stays deleted (SEEDED_FILE
+# remembers what was seeded, so it is never put back).
+BUNDLED_DIR = os.environ.get("BUNDLED_DIR", "/announcements")
+SEEDED_FILE = os.environ.get("SEEDED_FILE", "/data/seeded-announcements.json")
 
 # A page, not a broadcast - the same ceiling `/announce` uses.
 MAX_SECONDS = 120
@@ -84,6 +89,77 @@ def path_for(clip_id):
         return None
     p = os.path.join(CLIPS_DIR, clip_id + ".wav")
     return p if os.path.isfile(p) else None
+
+
+def content_type(path):
+    """What is really in the file: the recorder and the TTS both save mp3
+    under a .wav name, and a browser needs the truth to play it."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return "application/octet-stream"
+    if head[:4] == b"RIFF":
+        return "audio/wav"
+    if head[:3] == b"ID3" or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "audio/mpeg"
+    if head[:4] == b"OggS":
+        return "audio/ogg"
+    if head[:4] == b"\x1aE\xdf\xa3":
+        return "audio/webm"
+    return "application/octet-stream"
+
+
+def seed_bundled(bundled_dir=BUNDLED_DIR, seeded_file=SEEDED_FILE, log=print):
+    """Copy the shipped set into the house's folder, once each.
+
+    A clip is seeded if it is not in the folder AND was never seeded before:
+    the second condition is what keeps a deleted one deleted across restarts
+    and updates. A house's own clip with the same id is never overwritten.
+    Returns the ids added.
+    """
+    try:
+        names = sorted(os.listdir(bundled_dir))
+    except OSError:
+        return []
+    try:
+        with open(seeded_file) as fh:
+            seeded = set(json.load(fh))
+    except (OSError, ValueError):
+        seeded = set()
+    ensure_dir()
+    added = []
+    for fn in names:
+        if not fn.lower().endswith(".wav"):
+            continue
+        clip_id = fn[:-4]
+        if clip_id in seeded or path_for(clip_id):
+            continue
+        src = os.path.join(bundled_dir, fn)
+        meta = {}
+        try:
+            with open(os.path.join(bundled_dir, clip_id + ".json")) as fh:
+                meta = json.load(fh) or {}
+        except (OSError, ValueError):
+            pass
+        tmp = os.path.join(CLIPS_DIR, "." + clip_id + ".part")
+        with open(src, "rb") as a, open(tmp, "wb") as b:
+            b.write(a.read())
+        os.replace(tmp, os.path.join(CLIPS_DIR, fn))
+        _write_meta(clip_id, name=meta.get("name") or clip_id.replace("-", " ").title(),
+                    source="bundled", user_facing=bool(meta.get("user_facing", True)))
+        added.append(clip_id)
+    if added or not seeded:
+        seeded |= {fn[:-4] for fn in names if fn.lower().endswith(".wav")}
+        try:
+            os.makedirs(os.path.dirname(seeded_file), exist_ok=True)
+            with open(seeded_file, "w") as fh:
+                json.dump(sorted(seeded), fh)
+        except OSError as e:
+            log(f"[clips] could not remember what was seeded: {e}")
+    if added:
+        log(f"[clips] seeded {len(added)} bundled announcement(s): {', '.join(added)}")
+    return added
 
 
 def _looks_like_wav(path):

@@ -55,6 +55,24 @@ Any format GStreamer can decode is accepted; the browser sends WebM/Opus. It
 is decoded to the S24BE/48k/2ch the NAX expects, in a separate process so a
 strange upload cannot wedge the live pipeline.
 
+## The announcements every house starts with
+
+`announcements/` in the add-on ships 36 spoken clips, seeded into
+`/share/nax-announcements` the first time the add-on starts on a house - so the
+tile is never empty on a new install. 19 are on the tile
+(Breakfast Ready, Check Your Phones, Dinner Is Served, Family Meeting, Family Movie Night, Food Delivery Arrived, Good Morning, Head To Practice, Ice Cream Ready, Kids Come Downstairs, Laundry Finished, Lunchtime, Quick House Sweep, Quiet Hours, School Bus Five Minutes, Shoes And Backpacks, Someone To Front Door, Trash And Recycling, Weekend Mode); 17 are hidden, for Actions & Events only
+(Back Door Opened, Back Door Visitor, Front Door Opened, Front Door Visitor, Front Gate Visitor, House Armed, House Arming, House Disarmed, Man Gate Visitor, School Bus Outside, Shabbat Over, Shabbat Starting, Side Door Opened, Side Door Visitor, Side Gate Visitor, Vehicle Entering, Vehicle Exiting).
+
+Seeding is once per clip and remembered in `/data/seeded-announcements.json`:
+a bundled clip a person deletes stays deleted through restarts and updates, a
+house's own clip with the same id is never overwritten, and a clip added to a
+later release is seeded when that release arrives. The add-on's own page
+(Open Web UI) lists them, plays them back, uploads any audio file, speaks a
+typed sentence into a new clip, and hides or deletes any of them.
+
+The page needs no token through Home Assistant's ingress - it already made the
+person log in. The `api_token` still locks the port on the LAN.
+
 ## The zone list is the house's, not the rack's
 
 `GET /zones` - what the driver's Announcements page, HomeUI and the settings

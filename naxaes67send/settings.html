@@ -24,6 +24,16 @@
   <h1>Announcements &amp; paging - speakers</h1>
   <p class="lead">Which speakers a page reaches, and how loud. Zones come from the amplifier; page groups come from the Crestron Home processor. Saved settings take effect on the next page, no restart needed.</p>
 
+  <h2>Announcements</h2>
+  <p class="muted">The clips the Crestron Home tile and Actions &amp; Events can play. Shown = on the end user's tile; hidden ones stay available to automations. They live in <code>/share/nax-announcements</code>.</p>
+  <div class="card" id="clips"><span class="muted">reading...</span></div>
+  <div class="card">
+    <div class="row"><label>Name <input id="clipname" type="text" placeholder="Dinner is ready" style="width:16rem"></label></div>
+    <div class="row"><label>Audio file <input id="clipfile" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.webm"></label><button class="quiet" id="clipupload">Upload</button></div>
+    <div class="row"><label>or speak this text <input id="cliptext" type="text" placeholder="The pool gate is open" style="width:22rem"></label><button class="quiet" id="clipspeak">Make it</button></div>
+    <div class="row"><label><input id="clipfacing" type="checkbox" checked> Show on the tile</label><span id="clipstatus" class="muted"></span></div>
+  </div>
+
   <h2>Amplifiers</h2>
   <div class="card" id="amps"><span class="muted">reading...</span></div>
   <div class="row"><button class="quiet" id="scan">Find amplifiers</button><span id="scanstatus" class="muted"></span></div>
@@ -46,7 +56,7 @@
 </main>
 <script>
 const TOKEN = new URLSearchParams(location.search).get("token") || document.cookie.replace(/(?:(?:^|.*;\s*)naxtoken\s*=\s*([^;]*).*$)|^.*$/, "$1") || "";
-const base = location.pathname.replace(/\/ui\/?$/, "");
+const base = location.pathname.replace(/\/ui\/?$/, "").replace(/\/$/, "");
 const H = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
 let cfg = null, zones = {}, pagegroups = [];
 
@@ -141,5 +151,60 @@ document.getElementById("save").onclick = async () => {
     showAmps();
   };
   showAmps();
+})();
+
+// -- announcements: what is stored, play one back, upload or speak a new one, hide or delete --
+(function(){
+  const HH = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
+  const esc = v => String(v ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const st = (m, bad) => { const e = document.getElementById("clipstatus"); e.textContent = " " + (m || ""); e.style.color = bad ? "var(--bad)" : ""; };
+  async function showClips(list){
+    const el = document.getElementById("clips");
+    if (!list) { try { list = (await (await fetch(base + "/clips", {headers: HH, cache: "no-store"})).json()).clips || []; } catch(e) { el.innerHTML = '<span class="muted">could not read the clips</span>'; return; } }
+    if (!list.length) { el.innerHTML = '<span class="muted">No announcements yet. Upload one below, or type a sentence and have it spoken.</span>'; return; }
+    el.innerHTML = '<table><thead><tr><th>Name</th><th>id</th><th>from</th><th></th><th></th><th></th></tr></thead><tbody>' + list.map(c =>
+      `<tr><td>${esc(c.name)}</td><td><code>${esc(c.id)}</code></td><td class="muted">${esc(c.source)}</td>` +
+      `<td><button class="quiet" data-play="${esc(c.id)}">Play</button></td>` +
+      `<td><label><input type="checkbox" data-facing="${esc(c.id)}" ${c.user_facing ? "checked" : ""}> on tile</label></td>` +
+      `<td><button class="quiet" data-del="${esc(c.id)}">Delete</button></td></tr>`).join("") + "</tbody></table>";
+    el.querySelectorAll("[data-play]").forEach(b => b.onclick = async () => {
+      // through fetch, so the bearer (when there is one) goes with it
+      const r = await fetch(base + "/clipaudio?id=" + encodeURIComponent(b.dataset.play), {headers: HH});
+      if (!r.ok) { st("could not fetch that clip", true); return; }
+      new Audio(URL.createObjectURL(await r.blob())).play();
+    });
+    el.querySelectorAll("[data-facing]").forEach(cb => cb.onchange = async () => {
+      const r = await (await fetch(base + "/clipfacing?id=" + encodeURIComponent(cb.dataset.facing) + "&user_facing=" + (cb.checked ? "true" : "false"), {method: "POST", headers: HH})).json();
+      st(r.ok ? (cb.checked ? "shown on the tile" : "hidden from the tile") : r.error, !r.ok);
+    });
+    el.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+      if (!confirm("Delete \"" + b.dataset.del + "\"? Automations that play it will find nothing.")) return;
+      const r = await (await fetch(base + "/clipdelete?id=" + encodeURIComponent(b.dataset.del), {method: "POST", headers: HH})).json();
+      st(r.ok ? "deleted" : r.error, !r.ok); showClips(r.clips);
+    });
+  }
+  const facing = () => document.getElementById("clipfacing").checked ? "true" : "false";
+  document.getElementById("clipupload").onclick = async () => {
+    const f = document.getElementById("clipfile").files[0];
+    const name = document.getElementById("clipname").value.trim() || (f && f.name.replace(/\.[^.]+$/, ""));
+    if (!f) { st("choose an audio file first", true); return; }
+    st("uploading...");
+    try {
+      const r = await (await fetch(base + "/clips?name=" + encodeURIComponent(name) + "&user_facing=" + facing(),
+        {method: "POST", headers: Object.assign({"Content-Type": f.type || "application/octet-stream"}, HH), body: f})).json();
+      st(r.ok ? "saved as " + r.id : r.error, !r.ok); if (r.ok) { showClips(r.clips); document.getElementById("clipfile").value = ""; }
+    } catch(e) { st("upload failed: " + e, true); }
+  };
+  document.getElementById("clipspeak").onclick = async () => {
+    const text = document.getElementById("cliptext").value.trim();
+    const name = document.getElementById("clipname").value.trim() || text;
+    if (!text) { st("type what it should say", true); return; }
+    st("making it (a few seconds)...");
+    try {
+      const r = await (await fetch(base + "/clips?name=" + encodeURIComponent(name) + "&text=" + encodeURIComponent(text) + "&user_facing=" + facing(), {method: "POST", headers: HH})).json();
+      st(r.ok ? "saved as " + r.id : r.error, !r.ok); if (r.ok) showClips(r.clips);
+    } catch(e) { st("failed: " + e, true); }
+  };
+  showClips();
 })();
 </script>

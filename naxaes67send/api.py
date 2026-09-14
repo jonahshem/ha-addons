@@ -293,13 +293,30 @@ class Handler(BaseHTTPRequestHandler):
         """
         return self._json({"ok": False, "error": msg})
 
+    def _ingress(self):
+        """A request that came through Home Assistant's ingress.
+
+        The Supervisor proxies those with an `X-Ingress-Path` header, from its
+        own network (172.30.32.0/23) - which nothing on the house LAN can
+        forge as a source address. Home Assistant has already made the person
+        log in, so the token is not asked for again. Until 0.10.1 it was, and
+        "Open Web UI" showed `{"error": "Unauthorized"}` (110 Roosevelt).
+        """
+        if not self.headers.get("X-Ingress-Path"):
+            return False
+        ip = (self.client_address or ("",))[0]
+        return ip.startswith("172.30.32.") or ip.startswith("172.30.33.")
+
     def _allowed(self):
         # Ingress already authenticates; the token is a second lock for the
         # case where somebody exposes the port on the LAN.
-        if not TOKEN:
+        if not TOKEN or self._ingress():
             return True
         got = self.headers.get("Authorization", "")
         return got == f"Bearer {TOKEN}"
+
+    def _wants_page(self):
+        return "text/html" in (self.headers.get("Accept") or "")
 
     def _tail(self):
         # Ingress prefixes every path; only the tail is ours.
@@ -316,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
         tail = self._tail()
         amps = amplifiers()
 
+        # Ingress lands on "/": a browser gets the page, a program the health.
+        if tail == "/" and self._wants_page():
+            tail = "/ui"
         if tail in ("/health", "/"):
             return self._json({
                 "ok": True,
@@ -443,6 +463,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._live()
         if tail == "/clips":
             return self._save_clip()
+        if tail == "/clipaudio":
+            return self._clip_audio()
         if tail == "/clipdelete":
             return self._delete_clip()
         if tail == "/clipfacing":
@@ -929,6 +951,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail("%s: %s" % (type(e).__name__, e))
         log("[clips] saved %s" % clip_id)
         return self._json({"ok": True, "id": clip_id, "clips": clips.list_clips()})
+
+    def _clip_audio(self):
+        """The audio of one clip, for the page's play-back button."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        p = clips.path_for((q.get("id", [""])[0] or "").strip())
+        if not p:
+            return self._json({"error": "No such clip"}, 404)
+        with open(p, "rb") as fh:
+            body = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", clips.content_type(p))
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _clip_facing(self):
         """Show or hide one clip on the end user's tile."""
