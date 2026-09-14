@@ -133,15 +133,27 @@ def seed_bundled(bundled_dir=BUNDLED_DIR, seeded_file=SEEDED_FILE, log=print):
         if not fn.lower().endswith(".wav"):
             continue
         clip_id = fn[:-4]
-        if clip_id in seeded or path_for(clip_id):
-            continue
-        src = os.path.join(bundled_dir, fn)
         meta = {}
         try:
             with open(os.path.join(bundled_dir, clip_id + ".json")) as fh:
                 meta = json.load(fh) or {}
         except (OSError, ValueError):
             pass
+        if path_for(clip_id):
+            # Already here. A bundled clip that has never had a sound set
+            # takes the shipped setting (a later release may add one); a
+            # person's choice - even "none", stored as "" - is a key that
+            # exists, and is kept. A clip the house made itself is untouched.
+            have = _read_meta(clip_id)
+            if have.get("source") == "bundled":
+                new = {k: meta[k] for k in ("before", "after", "sound") if k in meta and k not in have}
+                if new:
+                    _write_meta(clip_id, **dict(have, **new))
+                    log(f"[clips] {clip_id}: shipped setting adopted: {new}")
+            continue
+        if clip_id in seeded:
+            continue
+        src = os.path.join(bundled_dir, fn)
         tmp = os.path.join(CLIPS_DIR, "." + clip_id + ".part")
         with open(src, "rb") as a, open(tmp, "wb") as b:
             b.write(a.read())
