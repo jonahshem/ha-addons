@@ -115,6 +115,52 @@ def install_integration(manifest, domain, target_root):
     return version
 
 
+HTTP_TRUST = """
+# Trust the Supervisor's Docker network, so add-ons that proxy to Home
+# Assistant - cloudflared above all - are not refused.
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.30.32.0/23
+"""
+
+
+def has_key(text, key):
+    """Is `key` already a top-level mapping key? Indented or commented does not
+    count - a nested `http:` is a different thing entirely."""
+    return any(line.strip().rstrip(":") == key and not line[:1].isspace()
+               and not line.lstrip().startswith("#")
+               for line in text.splitlines())
+
+
+def add_http_trust(target_root):
+    """Let cloudflared's requests through.
+
+    🔴 Home Assistant REJECTS proxied requests from anywhere it has not been
+    told to trust, so without this the tunnel is healthy, the origin answers,
+    and every request is still refused.
+
+    🔴 Never appended when the house already has its own `http:` - two
+    top-level keys of the same name is a Home Assistant that will not start,
+    which is far worse than a proxy it does not trust.
+    """
+    path = os.path.join(target_root, "configuration.yaml")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        text = ""
+    if has_key(text, "http"):
+        log("configuration.yaml already has its own `http:` - left alone. "
+            "Check it trusts 172.30.32.0/23, or cloudflared will be refused.")
+        return False
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(HTTP_TRUST if text.endswith("\n") or not text
+                     else "\n" + HTTP_TRUST)
+    log("added trusted proxies (172.30.32.0/23) to configuration.yaml")
+    return True
+
+
 def add_boot_hook(target_root):
     """Add `bav_house:` to configuration.yaml so it loads on every boot.
 
@@ -128,10 +174,9 @@ def add_boot_hook(target_root):
             text = f.read()
     except FileNotFoundError:
         text = ""
-    for line in text.splitlines():
-        if line.strip().rstrip(":") == "bav_house" and not line.startswith((" ", "\t")):
-            log("configuration.yaml already loads bav_house")
-            return False
+    if has_key(text, "bav_house"):
+        log("configuration.yaml already loads bav_house")
+        return False
     if text:
         shutil.copy2(path, path + ".bavsetup.bak")
     block = ("\n# Added by the BAV House Setup add-on: loads the commissioning\n"
@@ -190,6 +235,7 @@ def run(opts):
                 log(f"{domain}: not published yet, skipped")
         if opts.get("start_on_boot", True):
             add_boot_hook(root)
+        add_http_trust(root)
         STATE["done"] = True
         if opts.get("restart_after", True):
             log("restarting Home Assistant - a custom integration is only "

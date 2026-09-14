@@ -1,5 +1,5 @@
 name: BAV House Setup
-version: "1.0.0"
+version: "1.1.0"
 slug: bavsetup
 description: Puts the house-commissioning integration on this box and starts it - install this first on a new house
 # amd64 as well as aarch64: houses run Raspberry Pis, but a generic x86 box and
