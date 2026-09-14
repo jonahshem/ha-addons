@@ -55,6 +55,26 @@ Any format GStreamer can decode is accepted; the browser sends WebM/Opus. It
 is decoded to the S24BE/48k/2ch the NAX expects, in a separate process so a
 strange upload cannot wedge the live pipeline.
 
+## The zone list is the house's, not the rack's
+
+`GET /zones` - what the driver's Announcements page, HomeUI and the settings
+page all show - is shaped in two ways since 0.10.0:
+
+* **A bussed pair is one room.** A DM-NAX can bus two outputs (a stereo zone
+  and a bridged-mono partner, `IsBussed`/`BusId` on both); listed raw, "The
+  Snug" appeared twice. Measured at 110 Roosevelt: routing the primary alone
+  switches, raises and restores the partner with it. So the pair is one entry,
+  keyed by its lowest-numbered zone, with `members`; paging either member pages
+  the primary once.
+* **Crestron Home's media rooms set the list.** With `crpc_host` set, the
+  processor's room list (43 there, against 36 amplifier zones) is the list, in
+  its order; each room's speakers are matched by name (case and apostrophes
+  ignored). A room with no matching zone is still shown - as *"Room (no
+  speakers found)"*, `unavailable` set, and refused if it is the only target
+  of a page - because a room that silently disappears from the list is the one
+  nobody notices. A zone Home has no room for goes last, marked *"(not a room
+  in Crestron Home)"*. Without a processor the amplifier order stands.
+
 ## Finding the amplifiers
 
 Nobody should have to type six addresses. With `autodetect` on (the default)

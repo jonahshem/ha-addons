@@ -46,6 +46,7 @@ import crpcmedia
 import discover
 import naxctl
 import sender
+import zonelist
 
 PORT = int(os.environ.get("API_PORT", "8099"))
 # The STREAM's port, which the amplifier's receive slots must ask for. Not PORT
@@ -405,7 +406,18 @@ class Handler(BaseHTTPRequestHandler):
                     # house with two of them still pages through the one that
                     # is answering.
                     trouble[host] = f"{type(e).__name__}: {e}"
-            return self._json({"ok": True, "zones": zones, "trouble": trouble})
+            # Shaped like the house: Crestron Home's media rooms, in its
+            # order, each with its speakers; a bussed pair as one; a room
+            # whose speakers are not on any amplifier here still listed.
+            rooms = None
+            if _home is not None:
+                try:
+                    rooms = _home.media_rooms()
+                except Exception as e:
+                    log(f"[api] zones: processor did not give its rooms ({e}); amplifier order")
+            zones = zonelist.compose(zones, rooms)
+            return self._json({"ok": True, "zones": zones, "trouble": trouble,
+                               "rooms": len(rooms) if rooms is not None else None})
 
         if tail == "/clips":
             return self._json({"ok": True, "clips": clips.list_clips()})
@@ -581,6 +593,14 @@ class Handler(BaseHTTPRequestHandler):
         refs, why = resolve_zones(q.get("zones", [""])[0], amps, _home)
         if why:
             log(f"[api] zones: {why}")
+        # A room listed for completeness ("no speakers found") cannot be
+        # paged; asked for alongside real zones it is dropped, alone it is
+        # refused in words.
+        refs, roomonly = zonelist.targets_only(refs)
+        if roomonly:
+            log(f"[api] zones: {roomonly} have no speakers on any amplifier here")
+            if not refs:
+                return self._fail("Those rooms have no speakers on any amplifier here")
         for ref in refs:
             if not ref.strip():
                 continue

@@ -44,6 +44,26 @@ def _zone_order(name):
     return (0, int(tail)) if tail.isdigit() else (1, str(name))
 
 
+def mark_buses(zones):
+    """Fold bussed zones into one: the lowest-numbered member of a bus is the
+    primary and carries `members`; the others get `bus_of` naming it. A bus
+    with one member here (its partner elsewhere, or none) is left alone. In
+    place, and returned."""
+    groups = {}
+    for name, info in zones.items():
+        if info.get("bussed") and info.get("bus") not in (None, 0, "0"):
+            groups.setdefault(info["bus"], []).append(name)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=_zone_order)
+        primary = members[0]
+        zones[primary]["members"] = list(members)
+        for other in members[1:]:
+            zones[other]["bus_of"] = primary
+    return zones
+
+
 class NaxError(RuntimeError):
     pass
 
@@ -186,8 +206,15 @@ class Nax:
                 # and was simply inaudible, while every route and signal check
                 # said the page had worked.
                 "volume": ((zs.get(name) or {}).get("ZoneAudio") or {}).get("Volume"),
+                # A bussed zone follows another. The Snug at 110 Roosevelt is
+                # Zone5 (stereo) + Zone6 (bridged mono), BusId 1 on both, and
+                # routing Zone5 alone switches, raises and restores Zone6 with
+                # it - measured with a silent clip, 2026-09-14. One room.
+                "bussed": bool((zs.get(name) or {}).get("IsBussed")),
+                "bus": (zs.get(name) or {}).get("BusId"),
+                "config": (zs.get(name) or {}).get("ZoneConfiguration"),
             }
-        return out
+        return mark_buses(out)
 
     # -- the receive slot a zone listens on --------------------------------
     def rx_streams(self):
@@ -594,6 +621,13 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"({type(e).__name__}), rebuilding it")
                     pool.drop(host)
             conns[host] = nax
+            # A bussed partner is driven by its primary - routing the primary
+            # switched, raised and restored the partner (measured). Page the
+            # primary once, whichever of the two was asked for.
+            folded = list(dict.fromkeys((was_all.get(z) or {}).get("bus_of") or z for z in zones))
+            if folded != list(zones):
+                log(f"[nax] {host}: {list(zones)} -> {folded} (bussed)")
+            zones = folded
             taking = []
             for zone in zones:
                 if session_name:

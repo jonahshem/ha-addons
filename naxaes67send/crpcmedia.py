@@ -351,6 +351,22 @@ class CrestronHome:
                 out[names[rs["Id"]].lower()] = src
         return out
 
+    def media_rooms(self):
+        """[{id, name}] - every media room in Crestron Home, in its order.
+
+        From the warm snapshot when there is one (instant), else a live read.
+        This is the list a person expects to see: a room is in it because the
+        installer put speakers in that room, whichever amplifier drives them.
+        """
+        sub = self._sub
+        if not sub:
+            sub = self.call("IRpcMedia.GetSubsystem", {"systemRevstamp": 0})
+        rooms = sub.get("Rooms") or []
+        if rooms and not getattr(self, "_room_keys_logged", False):
+            self._room_keys_logged = True
+            self.log(f"[crpc] media room fields: {sorted(rooms[0].keys())}")
+        return [{"id": r.get("Id"), "name": (r.get("Name") or "").strip()} for r in rooms]
+
     def play(self, source_id):
         """What the app sends when the user presses Play."""
         self.call("IRpcMediaSources.SendCommand", {
