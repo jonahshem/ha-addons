@@ -155,7 +155,11 @@ def settings():
         zones = [str(z) for z in (g.get("zones") or []) if z]
         if g.get("name") and zones:
             groups.append({"name": str(g["name"]), "zones": zones, "page_group": str(g.get("page_group") or "")})
-    return {"default_percent": percent, "zone_volumes": vols, "speaker_groups": groups}
+    return {"default_percent": percent, "zone_volumes": vols, "speaker_groups": groups,
+            # What plays before/after every announcement unless the clip or
+            # the request says otherwise: "" or a clip id (one of the sounds).
+            "chime_before": str(o.get("chime_before") or "").strip(),
+            "chime_after": str(o.get("chime_after") or "").strip()}
 
 
 def floors():
@@ -389,7 +393,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "config": {
                 "default_percent": st["default_percent"],
                 "zone_volumes": [{"zone": z, "percent": p} for z, p in st["zone_volumes"].items()],
-                "speaker_groups": st["speaker_groups"]},
+                "speaker_groups": st["speaker_groups"],
+                "chime_before": st["chime_before"], "chime_after": st["chime_after"]},
                 "zones": zones, "page_groups": groups,
                 "active_page": (_home.active_page if _home is not None else None)})
         if tail == "/zones":
@@ -465,6 +470,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._save_clip()
         if tail == "/clipaudio":
             return self._clip_audio()
+        if tail == "/clipchime":
+            return self._clip_chime()
         if tail == "/clipdelete":
             return self._delete_clip()
         if tail == "/clipfacing":
@@ -493,6 +500,9 @@ class Handler(BaseHTTPRequestHandler):
                                          for g in want["speaker_groups"] if g.get("name")]
         if "default_percent" in want:
             options["default_percent"] = int(want["default_percent"])
+        for key in ("chime_before", "chime_after"):
+            if key in want:
+                options[key] = str(want[key] or "").strip()
         req = urllib.request.Request("http://supervisor/addons/self/options", method="POST",
                                      data=json.dumps({"options": options}).encode(),
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
@@ -663,6 +673,24 @@ class Handler(BaseHTTPRequestHandler):
         if len(blob) > MAX_AUDIO:
             return self._json({"error": "That is more audio than a page"}, 413)
 
+        # A doorbell before "someone is at the front door", a chime after
+        # "dinner is served": sounds are clips too, joined to the words here
+        # so the words stay clean and the sound can be changed later.
+        before, after = clips.resolve_chimes(clip_id or None, q.get("before", [None])[0],
+                                             q.get("after", [None])[0], settings())
+        parts = []
+        for side, cid in (("before", before), ("after", after)):
+            if not cid:
+                continue
+            sound = clips.audio_of(cid)
+            if sound is None:
+                log(f"[clips] no clip {cid!r} to play {side} - skipped")
+            parts.append((side, sound))
+        parts = [s for side, s in parts if side == "before" and s] + [blob] + [s for side, s in parts if side == "after" and s]
+        if len(parts) > 1:
+            log(f"[clips] {clip_id or 'announcement'}: " + " + ".join(
+                ([before] if before else []) + ["words"] + ([after] if after else [])))
+
         if not _speaking.acquire(timeout=WAIT_FOR_TURN):
             # Honest rather than queued: by the time the first page finished,
             # the second would be stale and nobody would know why it was late.
@@ -670,7 +698,7 @@ class Handler(BaseHTTPRequestHandler):
         # `_speak` owns the lock from here. It is released when the zones are
         # back, which now happens AFTER this response has gone out - so a page
         # arriving during that window is still refused rather than colliding.
-        return self._speak(blob, amps, targets)
+        return self._speak(parts, amps, targets)
 
     def _speak(self, blob, amps, targets):
         # A one-element list rather than a flag: the worker thread below takes
@@ -684,15 +712,19 @@ class Handler(BaseHTTPRequestHandler):
                 _speaking.release()
 
     def _speak_locked(self, blob, amps, targets, worker_owns):
-        tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
-        tmp.write(blob)
-        tmp.close()
-        try:
-            pcm = sender.decode_to_pcm(tmp.name)
-        except Exception as e:
-            return self._fail(f"Could not decode that audio: {e}")
-        finally:
-            os.unlink(tmp.name)
+        # One blob, or several to play one after another (chime, words, chime).
+        pcms = []
+        for part in (blob if isinstance(blob, (list, tuple)) else [blob]):
+            tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+            tmp.write(part)
+            tmp.close()
+            try:
+                pcms.append(sender.decode_to_pcm(tmp.name))
+            except Exception as e:
+                return self._fail(f"Could not decode that audio: {e}")
+            finally:
+                os.unlink(tmp.name)
+        pcm = clips.join_pcm(pcms) if len(pcms) > 1 else pcms[0]
 
         seconds = len(pcm) / (48000 * 2 * 3)
         if seconds > MAX_HOLD:
@@ -965,6 +997,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _clip_chime(self):
+        """What plays before/after one clip: `before=` / `after=` each a clip
+        id, "none", or "default"."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        clip_id = (q.get("id", [""])[0] or "").strip()
+        before = q.get("before", [None])[0]
+        after = q.get("after", [None])[0]
+        try:
+            meta = clips.set_chime(clip_id, before, after)
+        except clips.ClipError as e:
+            return self._fail(str(e))
+        return self._json({"ok": True, "id": clip_id, "before": meta.get("before"), "after": meta.get("after"),
+                           "clips": clips.list_clips()})
 
     def _clip_facing(self):
         """Show or hide one clip on the end user's tile."""

@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.11.0"
+version: "0.12.0"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64, amd64]
@@ -63,6 +63,12 @@ options:
   # room comes back on the right source but paused.
   crpc_host: ""
   crpc_pin: "2129918115"
+  # A sound before / after every announcement, by clip id - the shipped
+  # sounds are `ding-dong` and `chime`; blank for none. A clip's own setting
+  # (on the add-on's page) overrides this, and `before=none` on a request
+  # overrides both. The door and gate lines ship set to ding-dong.
+  chime_before: ""
+  chime_after: ""
   # Speakers and levels. Edited from the add-on's own page (Open Web UI) which
   # lists the amplifier's zones and the processor's page groups; kept here so
   # they survive and can be read. Percent as Crestron Home shows it.
@@ -95,6 +101,8 @@ schema:
   announce_volume: int?
   crpc_host: str?
   crpc_pin: str?
+  chime_before: str?
+  chime_after: str?
   default_percent: int?
   zone_volumes:
     - zone: str

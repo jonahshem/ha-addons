@@ -43,6 +43,8 @@ Through ingress, so anything calling it already holds a token for this house.
 GET  /health          is the stream up, is anything playing
 GET  /zones           every zone, its source, whether audio is present
 POST /announce?zones=Zone4[,Zone5]   audio in the body -> speak, then restore
+     &clip=ID                        ... or a stored clip
+     &before=ID|none  &after=ID|none  a sound around it (else the clip's / the house's setting)
 POST /scan            find the amplifiers on this network and add the new ones
 ```
 
@@ -72,6 +74,26 @@ typed sentence into a new clip, and hides or deletes any of them.
 
 The page needs no token through Home Assistant's ingress - it already made the
 person log in. The `api_token` still locks the port on the LAN.
+
+## A sound before or after the words
+
+"Ding-dong, someone is at the front door." Sounds are clips too - the shipped
+set includes `ding-dong` (a two-tone doorbell) and `chime` (one soft tone),
+hidden from the tile and flagged `sound` - and they are joined to the words
+**at play time**, with a 0.3 s breath between, so the recording stays clean
+and the sound can be changed later without re-recording anything.
+
+Who decides, most specific first:
+
+1. the request: `before=chime`, `after=none` on `/announce`;
+2. the clip's own setting (the page's *before* / *after* columns; `POST
+   /clipchime?id=&before=&after=`, each a clip id, `none`, or `default`);
+3. the house default: `chime_before` / `chime_after` in the options, also on
+   the page.
+
+The eight door, gate and delivery lines ship set to ring the doorbell first.
+A recorded-on-the-spot announcement has no clip, so it takes the request or
+the house default.
 
 ## The zone list is the house's, not the rack's
 

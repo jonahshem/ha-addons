@@ -33,6 +33,10 @@
     <div class="row"><label>or speak this text <input id="cliptext" type="text" placeholder="The pool gate is open" style="width:22rem"></label><button class="quiet" id="clipspeak">Make it</button></div>
     <div class="row"><label><input id="clipfacing" type="checkbox" checked> Show on the tile</label><span id="clipstatus" class="muted"></span></div>
   </div>
+  <div class="card">
+    <p class="muted" style="margin-top:0">A sound before or after every announcement - a doorbell, a chime. Each clip can override this in the list above (default / none / a sound).</p>
+    <div class="row"><label>Before every announcement <select id="chimebefore"></select></label><label>After <select id="chimeafter"></select></label><span id="chimestatus" class="muted"></span></div>
+  </div>
 
   <h2>Amplifiers</h2>
   <div class="card" id="amps"><span class="muted">reading...</span></div>
@@ -162,11 +166,33 @@ document.getElementById("save").onclick = async () => {
     const el = document.getElementById("clips");
     if (!list) { try { list = (await (await fetch(base + "/clips", {headers: HH, cache: "no-store"})).json()).clips || []; } catch(e) { el.innerHTML = '<span class="muted">could not read the clips</span>'; return; } }
     if (!list.length) { el.innerHTML = '<span class="muted">No announcements yet. Upload one below, or type a sentence and have it spoken.</span>'; return; }
-    el.innerHTML = '<table><thead><tr><th>Name</th><th>id</th><th>from</th><th></th><th></th><th></th></tr></thead><tbody>' + list.map(c =>
+    const sounds = list.filter(c => c.sound);
+    const opts = (v) => `<option value="default" ${v == null ? "selected" : ""}>default</option><option value="none" ${v === "" ? "selected" : ""}>none</option>` +
+      sounds.map(x => `<option value="${esc(x.id)}" ${v === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+    el.innerHTML = '<table><thead><tr><th>Name</th><th>id</th><th>from</th><th></th><th></th><th>before</th><th>after</th><th></th></tr></thead><tbody>' + list.map(c =>
       `<tr><td>${esc(c.name)}</td><td><code>${esc(c.id)}</code></td><td class="muted">${esc(c.source)}</td>` +
       `<td><button class="quiet" data-play="${esc(c.id)}">Play</button></td>` +
       `<td><label><input type="checkbox" data-facing="${esc(c.id)}" ${c.user_facing ? "checked" : ""}> on tile</label></td>` +
+      (c.sound ? "<td class=\"muted\" colspan=\"2\">a sound</td>"
+               : `<td><select data-before="${esc(c.id)}" style="min-width:7rem">${opts(c.before)}</select></td><td><select data-after="${esc(c.id)}" style="min-width:7rem">${opts(c.after)}</select></td>`) +
       `<td><button class="quiet" data-del="${esc(c.id)}">Delete</button></td></tr>`).join("") + "</tbody></table>";
+    for (const side of ["before", "after"]) el.querySelectorAll("[data-" + side + "]").forEach(sel => sel.onchange = async () => {
+      const r = await (await fetch(base + "/clipchime?id=" + encodeURIComponent(sel.dataset[side]) + "&" + side + "=" + encodeURIComponent(sel.value), {method: "POST", headers: HH})).json();
+      st(r.ok ? side + " " + sel.dataset[side] + ": " + (sel.value === "default" ? "the house default" : sel.value) : r.error, !r.ok);
+    });
+    // the house defaults, from the same sound list
+    const dopts = (v) => `<option value="" ${!v ? "selected" : ""}>none</option>` + sounds.map(x => `<option value="${esc(x.id)}" ${v === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+    try {
+      const c = (await (await fetch(base + "/config", {headers: HH, cache: "no-store"})).json()).config || {};
+      for (const [id, key] of [["chimebefore", "chime_before"], ["chimeafter", "chime_after"]]) {
+        const sel = document.getElementById(id); sel.innerHTML = dopts(c[key] || "");
+        sel.onchange = async () => {
+          const body = {}; body[key] = sel.value;
+          const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify(body)})).json();
+          document.getElementById("chimestatus").textContent = r.ok ? " saved" : " " + (r.error || "failed");
+        };
+      }
+    } catch(e) {}
     el.querySelectorAll("[data-play]").forEach(b => b.onclick = async () => {
       // through fetch, so the bearer (when there is one) goes with it
       const r = await fetch(base + "/clipaudio?id=" + encodeURIComponent(b.dataset.play), {headers: HH});

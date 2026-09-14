@@ -146,8 +146,12 @@ def seed_bundled(bundled_dir=BUNDLED_DIR, seeded_file=SEEDED_FILE, log=print):
         with open(src, "rb") as a, open(tmp, "wb") as b:
             b.write(a.read())
         os.replace(tmp, os.path.join(CLIPS_DIR, fn))
-        _write_meta(clip_id, name=meta.get("name") or clip_id.replace("-", " ").title(),
-                    source="bundled", user_facing=bool(meta.get("user_facing", True)))
+        fields = {"name": meta.get("name") or clip_id.replace("-", " ").title(),
+                  "source": "bundled", "user_facing": bool(meta.get("user_facing", True))}
+        for key in ("sound", "before", "after"):
+            if key in meta:
+                fields[key] = meta[key]
+        _write_meta(clip_id, **fields)
         added.append(clip_id)
     if added or not seeded:
         seeded |= {fn[:-4] for fn in names if fn.lower().endswith(".wav")}
@@ -196,6 +200,13 @@ def list_clips():
             # should be handed. Absent means True, so clips saved before this
             # existed keep showing.
             "user_facing": bool(meta.get("user_facing", True)),
+            # A sound rather than words - a doorbell, a chime - offered as
+            # what to play before or after an announcement, never as one.
+            "sound": bool(meta.get("sound")),
+            # What plays before/after this clip: absent = the house default,
+            # "" = nothing, else a clip id (normally one of the sounds).
+            "before": meta.get("before"),
+            "after": meta.get("after"),
             "bytes": size,
             # Only meaningful for uncompressed PCM. A clip that arrived as mp3
             # (Fish returns nothing else) is a tenth the size for the same
@@ -218,6 +229,71 @@ def set_user_facing(clip_id, facing):
     meta["user_facing"] = bool(facing)
     _write_meta(clip_id, **meta)
     return clip_id
+
+
+def set_chime(clip_id, before=None, after=None):
+    """What plays around one clip. None leaves a side alone; "default" clears
+    it back to the house setting; "none" or "" means nothing; else a clip id."""
+    clip_id = _slug(clip_id)
+    if not path_for(clip_id):
+        raise ClipError("No such clip")
+    meta = _read_meta(clip_id)
+    for key, val in (("before", before), ("after", after)):
+        if val is None:
+            continue
+        val = str(val).strip()
+        if val.lower() == "default":
+            meta.pop(key, None)
+        elif val.lower() in ("", "none"):
+            meta[key] = ""
+        else:
+            if not path_for(_slug(val)):
+                raise ClipError(f"No clip called {val!r} to play {key}")
+            meta[key] = _slug(val)
+    _write_meta(clip_id, **meta)
+    return meta
+
+
+def resolve_chimes(clip_id, q_before, q_after, defaults):
+    """(before_id, after_id) for one announcement - "" for nothing.
+
+    Three places may say, most specific first: the request (`before=` /
+    `after=`, "none" to suppress), the clip's own setting, the house default
+    (`chime_before` / `chime_after` in the options). A recorded-on-the-spot
+    announcement has no clip, so it gets the request or the default.
+    """
+    meta = _read_meta(clip_id) if clip_id else {}
+    out = []
+    for key, asked in (("before", q_before), ("after", q_after)):
+        if asked is not None:
+            v = str(asked).strip()
+            out.append("" if v.lower() in ("", "none") else _slug(v))
+        elif key in meta:
+            out.append(str(meta.get(key) or ""))
+        else:
+            out.append(str((defaults or {}).get("chime_" + key) or ""))
+    return out[0], out[1]
+
+
+def audio_of(clip_id):
+    """The stored bytes of a clip, or None if there is no such clip."""
+    p = path_for(clip_id) if clip_id else None
+    if not p:
+        return None
+    with open(p, "rb") as fh:
+        return fh.read()
+
+
+GAP_SECONDS = 0.3
+PCM_BYTES_PER_SECOND = 48000 * 2 * 3      # what the sender plays: S24BE stereo
+
+
+def join_pcm(parts, gap=GAP_SECONDS):
+    """Decoded parts, one after another with a short silence between - the
+    doorbell, a breath, then the words. Empty parts are skipped."""
+    parts = [p for p in parts if p]
+    silence = b"\0" * (int(gap * PCM_BYTES_PER_SECOND) // 6 * 6)
+    return silence.join(parts)
 
 
 def save_audio(name, blob, source="recorded", user_facing=True):
