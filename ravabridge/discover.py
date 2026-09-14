@@ -313,25 +313,56 @@ def save_local(options, path=LOCAL_STATE):
         pass
 
 
+def clear_local(path=LOCAL_STATE):
+    """The options now hold what discovery found. A copy left here would only
+    ever be re-applied over somebody's later deletions."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def load_local(cfg, path=LOCAL_STATE):
-    """Options plus what an earlier discovery found: union by panel host and door user."""
+    """Options plus what an earlier discovery could not save.
+
+    The file is a fallback for a run in which the Supervisor would not take the
+    options. 🔴 It used to be folded in at EVERY start, by door account name, so
+    a door that discovery had added and a person had since deleted from the
+    options came back on the next restart - and kept coming back, however many
+    times it was deleted (110 Roosevelt, 2026-09-14). Two rules now: if the
+    Supervisor's options can be read, they are the truth, the file is stale,
+    and it is removed with nothing merged; and even when the file is used, a
+    saved door is skipped if one with the same account OR the same name is
+    already there.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             saved = json.load(f)
     except (OSError, ValueError):
         return cfg
+    try:
+        options, _ = supervisor_options()
+    except Exception:
+        options = None
+    if options is not None:
+        clear_local(path)
+        return cfg
+
+    def slug(v):
+        return re.sub(r"[^a-z0-9]", "", str(v or "").lower())
+
     hosts = {p.get("host") for p in cfg.get("panels") or []}
     for p in saved.get("panels") or []:
         if p.get("host") and p["host"] not in hosts:
             cfg.setdefault("panels", []).append(p)
-    users = {d.get("user") for d in cfg.get("doors") or []}
     for d in saved.get("doors") or []:
-        if d.get("user") and d["user"] not in users:
+        match = next((m for m in cfg.get("doors") or []
+                      if (d.get("user") and m.get("user") == d["user"])
+                      or (d.get("name") and slug(m.get("name")) == slug(d["name"]))), None)
+        if match is None and d.get("user"):
             cfg.setdefault("doors", []).append(d)
-        elif d.get("user") in users and d.get("door_id"):
-            for mine in cfg["doors"]:
-                if mine.get("user") == d["user"] and not mine.get("door_id"):
-                    mine["door_id"] = d["door_id"]
+        elif match is not None and d.get("door_id") and not match.get("door_id"):
+            match["door_id"] = d["door_id"]
     return cfg
 
 
@@ -373,6 +404,7 @@ def run(cfg, bind_ip, log=None, apply=None):
             try:
                 supervisor_write(live, token)
                 report["saved"] = True
+                clear_local()          # the options hold it now; a stale copy only resurrects deletions
             except Exception as e:
                 body = getattr(e, "read", lambda: b"")()
                 report["error"] = f"could not save options: {e!r} {body[:300].decode('utf-8', 'replace') if body else ''}"
