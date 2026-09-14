@@ -590,8 +590,17 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     f"music will not be resumed after this page")
         reader = threading.Thread(target=read_home, daemon=True, name="crpc-read")
         reader.start()
+    def level_for(zone, host=None):
+        # `floor` is one level for every zone, or {"host:zone": level} with a
+        # "*" default - the settings page sets one per room.
+        if not isinstance(floor, dict):
+            return floor
+        return floor.get(f"{_host[0]}:{zone}", floor.get("*"))
+
+    _host = [None]
     try:
         for host, zones in targets.items():
+            _host[0] = host
             cfg = amps.get(host) or {}
             # Read every zone once, not once per zone. Each read is two HTTPS
             # round trips to the amplifier, and paging the whole house would
@@ -662,9 +671,7 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                         f"it instead of restoring it")
                     was = ""
                 before[(host, zone)] = was
-                # `floor` is one level for every zone, or {"host:zone": level}
-                # with a "*" default - the settings page sets one per room.
-                level = floor.get(f"{host}:{zone}", floor.get("*")) if isinstance(floor, dict) else floor
+                level = level_for(zone)
                 if level:
                     had = (was_all.get(zone) or {}).get("volume")
                     if had is not None and had < level:
@@ -694,6 +701,27 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     log(f"[nax] {host} {zone}: {source} bound after {n} "
                         f"write(s), was {before[(host, zone)]!r}")
                     taken.setdefault(host, []).append(zone)
+            # 🔴 The volume again, AFTER the route. A zone that was idle turns
+            # on when a source is routed to it and takes its DefaultVolume as
+            # it does - wiping the level set a second earlier. Measured at 110
+            # Roosevelt (2026-09-14): The Snug set to 700, route lands, the
+            # amplifier reads 300. A zone already playing was already on, so
+            # its level stuck, which is why "the volume changes when music is
+            # playing but not when nothing is" was exactly the symptom.
+            if any(level_for(z) for z in taken.get(host, [])):
+                try:
+                    now_all = nax.zones()
+                except Exception as e:
+                    log(f"[nax] {host}: could not read the volumes back after routing ({e})")
+                    now_all = {}
+                for zone in taken.get(host, []):
+                    level = level_for(zone)
+                    cur = (now_all.get(zone) or {}).get("volume")
+                    if level and cur is not None and cur < level:
+                        volumes.setdefault((host, zone), (was_all.get(zone) or {}).get("volume"))
+                        nax.set_volume(zone, level)
+                        log(f"[nax] {host} {zone}: volume fell to {cur} as the route "
+                            f"landed (the zone's default) -> {level} again")
         if len(before) > len(refused) or not refused:
             # Everything the caller needs to answer with is already known here:
             # which zones were taken, what each will go back to, which were
