@@ -43,6 +43,7 @@ Through ingress, so anything calling it already holds a token for this house.
 GET  /health          is the stream up, is anything playing
 GET  /zones           every zone, its source, whether audio is present
 POST /announce?zones=Zone4[,Zone5]   audio in the body -> speak, then restore
+POST /scan            find the amplifiers on this network and add the new ones
 ```
 
 `/announce` is synchronous — the caller wants to know whether a page was
@@ -54,11 +55,40 @@ Any format GStreamer can decode is accepted; the browser sends WebM/Opus. It
 is decoded to the S24BE/48k/2ch the NAX expects, in a separate process so a
 strange upload cannot wedge the live pipeline.
 
+## Finding the amplifiers
+
+Nobody should have to type six addresses. With `autodetect` on (the default)
+the add-on looks for amplifiers at start, every six hours, and when the
+**Find amplifiers** button on its page is pressed:
+
+1. every host on the /24 the stream leaves by (or `subnet`) with 443 open;
+2. of those, the ones whose web server answers `Server: Crestron Webserver` —
+   nothing that is not Crestron does, so this needs no credentials;
+3. of those, not the ones whose reverse-DNS name says panel, processor,
+   gateway or PDU (`TSW-`, `CP4`, `CEN-`, `PC-350` …);
+4. what is left is logged into with `amp_password` — first as `amp_user`,
+   then as the other factory username (`admin` / `chdevice` — Crestron ships
+   both, by firmware) — and anything that answers `ZoneOutputs` is an
+   amplifier. Whichever user worked is what gets saved.
+
+Verified amplifiers are added to `amps` through the Supervisor, so they show
+on the Configuration tab like ones typed by hand, and the running add-on can
+use them at once. **Adds only** — never removes or rewrites an amplifier a
+person entered. A device with `NAX` in its name that refuses both logins is
+reported by name and address on the page and in the log rather than dropped,
+because that is a wrong password, not a missing amplifier.
+
+Measured at 110 Roosevelt (six DM-NAX, three of them renamed by the
+installer): 82 hosts on 443, 26 Crestron, the six amplifiers found, and both
+of the ones checked by hand said `403` to `admin` and let `chdevice` in.
+
 ## Options
 
 | | |
 |---|---|
-| `nax_host` | the amplifier, e.g. `192.168.0.51` |
+| `amps` | the amplifiers: `host`, `user`, `password` each. Filled in by auto-detect; add by hand if you prefer |
+| `autodetect` / `amp_user` / `amp_password` / `subnet` | see above. `subnet` blank = the /24 the stream leaves by |
+| `nax_host` | (older option) one amplifier, e.g. `192.168.0.51` |
 | `nax_user` / `nax_password` | `admin` or `chdevice`, Crestron Home common device password |
 | `mcast` / `port` | must be inside `239.8.0.0`–`239.128.255.255` |
 | `session` | the SAP session name the NAX will show |

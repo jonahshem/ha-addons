@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.8.0"
+version: "0.9.0"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64, amd64]
@@ -29,6 +29,20 @@ options:
   # stream, so one sender serves every amplifier - the list is only about
   # which ones we may log in to and switch.
   amps: []
+  # Find the amplifiers on this network at start, every six hours, and on the
+  # settings page's Find amplifiers button. Anything serving Crestron's web UI
+  # that is not a panel, processor, gateway or PDU is logged into with these
+  # credentials; the ones that answer as an amplifier are added to `amps`
+  # above. Adds only - never removes or edits an amplifier typed by hand. A
+  # NAX that refuses the login is reported by name and address instead.
+  # Crestron devices ship as `admin` or `chdevice` depending on firmware, so
+  # both are tried (this one first) and the one that worked is saved.
+  autodetect: true
+  amp_user: admin
+  amp_password: "2129918115"
+  # Leave blank to sweep the /24 the stream leaves by. Set it for a house whose
+  # amplifiers live on a different subnet from this box.
+  subnet: ""
   # A house LAN is flat: this port is reachable by anything on it, so the API is
   # locked by default rather than open. The default matches the PIN this dealer
   # already uses for device logins, so a fresh install works without a lookup -
@@ -58,6 +72,10 @@ options:
   api_port: 8099
 schema:
   iface: str?
+  autodetect: bool?
+  amp_user: str?
+  amp_password: password?
+  subnet: str?
   mcast: str
   port: int
   session: str

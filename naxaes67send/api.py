@@ -43,6 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import clips
 import crpcmedia
+import discover
 import naxctl
 import sender
 
@@ -241,6 +242,11 @@ def amplifiers():
     if legacy and legacy not in out:
         out[legacy] = {"user": os.environ.get("NAX_USER", "admin"),
                        "password": os.environ.get("NAX_PASS", "")}
+    # Found on the network since this process started. The options hold them
+    # too, but AMPS_JSON was read at start; this is how a page reaches an
+    # amplifier discovered five minutes ago without a restart.
+    for host, cfg in discover.DISCOVERED.items():
+        out.setdefault(host, dict(cfg))
     return out
 
 
@@ -327,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
                 "amps": sorted(amps),
                 # The single most useful thing to know when a page is silent:
                 # the sender must be running for the route to bind at all.
+                "discovery": discover.public(),
                 "note": "the stream carries silence until an announcement is sent",
             })
 
@@ -412,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
         tail = self._tail()
         if tail == "/discover":
             return self._discover()
+        if tail == "/scan":
+            return self._scan()
         if tail == "/repair":
             return self._repair()
         if tail == "/announce":
@@ -482,6 +491,22 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return b""
         return self.rfile.read(min(length, cap))
+
+    def _scan(self):
+        """Find the amplifiers on this network and add the ones that let us in."""
+        try:
+            want = json.loads(self._body(MAX_BODY) or b"{}")
+        except ValueError:
+            want = {}
+        user = str(want.get("user") or os.environ.get("AMP_USER") or "admin").strip()
+        password = str(want.get("password") or os.environ.get("AMP_PASSWORD") or "")
+        subnet = str(want.get("subnet") or os.environ.get("SUBNET") or "").strip() or None
+        try:
+            base = sender.local_ip(MCAST)
+        except Exception as e:
+            return self._fail(f"could not work out this box's address: {e}")
+        report = discover.run(base, user, password, amplifiers(), log=log, subnet=subnet)
+        return self._json(dict(report, ok=not report.get("error")))
 
     def _discover(self):
         """One amplifier's zones, for a login that has not been saved yet."""

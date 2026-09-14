@@ -16,6 +16,12 @@ export NAX_PASS=$(get nax_password)
 # a list anyway.
 export AMPS_JSON=$(python3 -c "import json;print(json.dumps(json.load(open('$CONF')).get('amps') or []))" 2>/dev/null || echo '[]')
 export API_TOKEN=$(get api_token)
+# Finding amplifiers on the network: on by default, with the credentials to try
+# on what it finds. Blank password = find and report, never log in.
+export AUTODETECT=$(get autodetect); export AUTODETECT=${AUTODETECT:-true}
+export AMP_USER=$(get amp_user); export AMP_USER=${AMP_USER:-admin}
+export AMP_PASSWORD=$(get amp_password)
+export SUBNET=$(get subnet)
 export API_PORT=$(get api_port); export API_PORT=${API_PORT:-8099}
 # Padding around a clip. Empty is fine - api.py carries the defaults.
 export LEAD_SECONDS=$(get lead_seconds)

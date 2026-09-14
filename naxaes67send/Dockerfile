@@ -12,6 +12,7 @@ COPY main.py /main.py
 COPY sender.py /sender.py
 COPY sap.py /sap.py
 COPY naxctl.py /naxctl.py
+COPY discover.py /discover.py
 COPY api.py /api.py
 COPY clips.py /clips.py
 COPY crpcmedia.py /crpcmedia.py

@@ -24,6 +24,10 @@
   <h1>Announcements &amp; paging - speakers</h1>
   <p class="lead">Which speakers a page reaches, and how loud. Zones come from the amplifier; page groups come from the Crestron Home processor. Saved settings take effect on the next page, no restart needed.</p>
 
+  <h2>Amplifiers</h2>
+  <div class="card" id="amps"><span class="muted">reading...</span></div>
+  <div class="row"><button class="quiet" id="scan">Find amplifiers</button><span id="scanstatus" class="muted"></span></div>
+
   <h2>Zone volume for announcements and pages</h2>
   <div class="card">
     <p class="muted" style="margin-top:0">A room quieter than this is turned up to it for the duration, then put back. A room already louder is left alone. Percent, as Crestron Home shows it.</p>
@@ -108,5 +112,34 @@ document.getElementById("save").onclick = async () => {
     cfg.default_percent = cfg.default_percent || 70;
     renderVolumes(); renderGroups(); renderPageGroups();
   } catch (e) { status("Could not load settings: " + e.message, "bad"); }
+})();
+
+// -- amplifiers: what is configured, what the last scan found, and a scan on demand --
+(function(){
+  const HH = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
+  const esc = v => String(v ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  async function showAmps(){
+    let d; try { d = await (await fetch(base + "/health", {headers: HH, cache: "no-store"})).json(); } catch(e) { return; }
+    const el = document.getElementById("amps"); const disc = d.discovery || {};
+    let h = (d.amps && d.amps.length) ? "<b>Configured:</b> " + d.amps.map(esc).join(", ") : '<span class="muted">No amplifier configured yet.</span>';
+    if (disc.at) {
+      h += "<br><span class=\"muted\">Last scan of " + esc(disc.base) + ".0/24: " + esc(disc.crestron) + " Crestron device(s)";
+      if (disc.found && disc.found.length) h += "; verified " + disc.found.map(f => esc((f.name||f.host) + " (" + f.host + (f.zones ? ", " + f.zones + " zones" : "") + ")")).join(", ");
+      h += "</span>";
+      if (disc.added && disc.added.length) h += "<br>Added to the options: " + disc.added.map(esc).join(", ");
+      if (disc.unverified && disc.unverified.length) h += "<br><span style=\"color:var(--bad)\">Look like amplifiers but refused the login (check amp_user / amp_password in the add-on options): " + disc.unverified.map(u => esc((u.name||"?") + " at " + u.host)).join(", ") + "</span>";
+      if (disc.error) h += "<br><span style=\"color:var(--bad)\">" + esc(disc.error) + "</span>";
+    }
+    el.innerHTML = h;
+  }
+  document.getElementById("scan").onclick = async () => {
+    const st = document.getElementById("scanstatus"); st.textContent = " scanning the network (about ten seconds)...";
+    try {
+      const r = await (await fetch(base + "/scan", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: "{}"})).json();
+      st.textContent = r.ok ? " done: " + (r.found||[]).length + " amplifier(s) verified, " + (r.added||[]).length + " added, " + (r.unverified||[]).length + " unverified" : " " + (r.error || "failed");
+    } catch(e) { st.textContent = " scan failed: " + e; }
+    showAmps();
+  };
+  showAmps();
 })();
 </script>
