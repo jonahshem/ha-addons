@@ -1,4 +1,7 @@
+import asyncio
 import logging
+
+from .crestron_home_api import paths as _paths, raw_to_pct
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
     MediaPlayerEntity,
@@ -30,19 +33,20 @@ class CrestronMediaRoom(CoordinatorEntity, MediaPlayerEntity):
     """
     Read-only representation of a Crestron Media Room (AV Zone).
 
-    NOTE: This entity intentionally has no controls (no power/volume/source
-    buttons). We could not confirm a real write endpoint for media rooms -
-    every guessed variant of POST /mediarooms/SetState and
-    POST /mediarooms/state/{id} either returned a generic "invalid device id"
-    error regardless of payload shape, or silently hit Crestron's catch-all
-    root API response (same tell that exposed /quickactions/run as fake).
-    Rather than ship buttons that look real but silently fail, this just
-    displays accurate live status. Control can be added once the real
-    endpoint is confirmed via a packet capture of the official Crestron
-    Home app.
+    Controllable media room (AV zone): power, volume, mute and source select.
     """
 
-    _attr_supported_features = MediaPlayerEntityFeature(0)  # No controls - status display only
+    # Controllable since the real per-verb endpoints were confirmed live (2026-09-16,
+    # 14 Malke): POST /mediarooms/{id}/{power/on|off, volume/{0-100}, mute, unmute,
+    # selectsource/{sid}}. The old read-only note guessed /mediarooms/SetState, which the
+    # processor rejects. No transport control (play/pause/next) - the REST API has none.
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.TURN_ON
+        | MediaPlayerEntityFeature.TURN_OFF
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.VOLUME_MUTE
+        | MediaPlayerEntityFeature.SELECT_SOURCE
+    )
 
     def __init__(self, coordinator, api, room_id, name):
         super().__init__(coordinator)
@@ -91,8 +95,9 @@ class CrestronMediaRoom(CoordinatorEntity, MediaPlayerEntity):
         # volume control exists there, so currentVolumeLevel is meaningless.
         if "none" in [str(v).lower() for v in data.get("availableVolumeControls", [])]:
             return None
-        vol = data.get("currentVolumeLevel", 0)
-        return float(vol) / 100.0
+        # currentVolumeLevel is an unbounded integer (NAX internal, ~0-65535);
+        # the SET endpoint takes 0-100%. Bound it to HA's 0-1 for the slider.
+        return min(1.0, max(0.0, (raw_to_pct(data.get("currentVolumeLevel", 0)) or 0) / 100.0))
 
     @property
     def is_volume_muted(self):
@@ -118,3 +123,37 @@ class CrestronMediaRoom(CoordinatorEntity, MediaPlayerEntity):
         data = self._get_room_data()
         room_name = get_room_name(self.coordinator, data.get("roomId")) or "Unknown Room"
         return {"crestron_room": room_name}
+
+    # -- controls (real per-verb /mediarooms endpoints) -------------------------------
+
+    def _source_id(self, source_name):
+        for src in self._get_room_data().get("availableSources", []):
+            if str(src.get("sourceName")) == str(source_name):
+                return src.get("id", src.get("sourceId"))
+        return None
+
+    async def _do(self, spec):
+        method, path, body = spec
+        await self._api.request(method, path, body)
+        await asyncio.sleep(0.5)
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs):
+        await self._do(_paths.mediaroom(self._room_id, "power", "on"))
+
+    async def async_turn_off(self, **kwargs):
+        await self._do(_paths.mediaroom(self._room_id, "power", "off"))
+
+    async def async_set_volume_level(self, volume):
+        pct = max(0, min(100, int(round(float(volume) * 100))))
+        await self._do(_paths.mediaroom(self._room_id, "volume", pct))
+
+    async def async_mute_volume(self, mute):
+        await self._do(_paths.mediaroom(self._room_id, "mute" if mute else "unmute"))
+
+    async def async_select_source(self, source):
+        sid = self._source_id(source)
+        if sid is None:
+            _LOGGER.warning("Crestron media room %s has no source named %r", self._room_id, source)
+            return
+        await self._do(_paths.mediaroom(self._room_id, "selectsource", sid))

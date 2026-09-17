@@ -28,7 +28,7 @@ an ordinary update in **Settings > Updates**.
 | Integration | Version | Files |
 |---|---|---|
 | `bav_house` | 1.1.0 | 15 |
-| `crestron_home` | 1.1.0 | 19 |
+| `crestron_home` | 1.2.0 | 20 |
 
 Source of truth is the private `crestron_home` monorepo; this repository is
 written by `Tools/publish_ha_addons.py` there and should not be edited by hand.
