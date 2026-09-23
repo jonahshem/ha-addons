@@ -15,7 +15,7 @@ store when a version changes here.
 |---|---|---|---|
 | **BAV House Setup** (`bavsetup`) | 1.1.0 | [aarch64, amd64] | Puts the house-commissioning integration on this box and starts it - install this first on a new house |
 | **Rava Bridge** (`ravabridge`) | 0.12.1 | [aarch64, amd64] | A SIP door station or phone rings the Crestron Home touch panels, with the door's picture, without touching the panels' Rava setup |
-| **NAX AES67 Sender** (`naxaes67send`) | 0.13.0 | [aarch64, amd64] | AES67 announcements into a DM NAX - a always-on stream, spoken into on demand |
+| **NAX AES67 Sender** (`naxaes67send`) | 0.13.1 | [aarch64, amd64] | AES67 announcements into a DM NAX - a always-on stream, spoken into on demand |
 | **NAX AES67 Probe** (`naxaes67probe`) | 0.2.0 | [aarch64, amd64] | Read-only PTP/multicast feasibility probe for AES67 into the DM NAX |
 
 ## Custom integrations

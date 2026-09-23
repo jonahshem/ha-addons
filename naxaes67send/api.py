@@ -14,6 +14,7 @@ same flat LAN as everything else.
     GET  /cliptext?id=    what a clip says (typed, or transcribed once and kept)
     POST /tts?text=&voice=&speed=      speak without saving - the editor's Play
     POST /clipregen?id=&text=&voice=&speed=   speak new words into an existing clip
+    POST /fleetkey        {fish_api_key} -> checked with Fish, kept in /homeassistant/.bav_fleet.json
 
 **A house can have more than one amplifier**, and most of the shape here comes
 from that. Zones are named `<host>:ZoneN` throughout, because `Zone4` alone
@@ -459,6 +460,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "voices": clips.VOICES, "default": voice,
                                # Never the key itself - only whether there is one.
                                "fish": bool(key),
+                               # "options", "fleet" (the house's private file), "env" or None
+                               "fish_source": clips.fish_key_source(),
                                "speed": {"min": clips.SPEED_MIN, "max": clips.SPEED_MAX}})
         if tail == "/cliptext":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -500,6 +503,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._tts_preview()
         if tail == "/clipregen":
             return self._clip_regen()
+        if tail == "/fleetkey":
+            return self._fleet_key()
         return self._json({"error": "Not found"}, 404)
 
     def _save_config(self):
@@ -1044,6 +1049,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Speech-Engine", engine)
         self.end_headers()
         self.wfile.write(audio)
+
+    def _fleet_key(self):
+        """Keep a Fish key in the house's private fleet file (never in the
+        public repository), after Fish has said it works."""
+        try:
+            want = json.loads(self._body(MAX_BODY) or b"{}")
+        except ValueError:
+            return self._json({"error": "Bad request"}, 400)
+        try:
+            res = clips.save_fleet_key(str(want.get("fish_api_key") or ""))
+        except clips.ClipError as e:
+            return self._fail(str(e))
+        except OSError as e:
+            return self._fail(f"Could not write the fleet file: {e}")
+        log(f"[clips] Fish key saved to {res['path']}")
+        return self._json({"ok": True, "credit": res["credit"]})
 
     def _clip_regen(self):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)

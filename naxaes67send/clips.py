@@ -381,23 +381,105 @@ FISH_FALLBACK_MODEL = "s1"
 
 OPTIONS_FILES = (os.environ.get("SETTINGS_FILE", "/data/settings.json"),
                  os.environ.get("OPTIONS_FILE", "/data/options.json"))
+# The house's private fleet file - the one the image seeder writes and
+# `bav_house` reads the Cloudflare token from. It lives in Home Assistant's
+# own config folder (`homeassistant_config` is mapped at /homeassistant), so a
+# key in it is only as exposed as the box, and never in the public add-on
+# repository, which anyone can read. /config is the older mapping's name.
+FLEET_FILES = tuple(p for p in (os.environ.get("FLEET_FILE"),
+                                "/homeassistant/.bav_fleet.json",
+                                "/config/.bav_fleet.json") if p)
+FISH_WALLET_URL = "https://api.fish.audio/wallet/self/api-credit"
 
 
-def fish_settings():
-    """(api key, default voice, model) - read fresh, so a key pasted on the
-    page works on the next click rather than the next restart."""
-    o = {}
+def _options():
     for path in OPTIONS_FILES:
         try:
             with open(path) as fh:
-                o = json.load(fh)
-            break
+                return json.load(fh)
         except Exception:
             continue
-    key = str(o.get("fish_api_key") or os.environ.get("FISH_API_KEY") or "").strip()
+    return {}
+
+
+def _fleet():
+    """(the fleet file's contents, its path) - the first that exists."""
+    for path in FLEET_FILES:
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            return (data if isinstance(data, dict) else {}), path
+        except FileNotFoundError:
+            continue
+        except Exception:
+            return {}, path
+    return {}, None
+
+
+def fish_key_source():
+    """Where the key comes from: "options" (typed into this add-on), "fleet"
+    (the house's private file), "env", or None."""
+    if str(_options().get("fish_api_key") or "").strip():
+        return "options"
+    if str(_fleet()[0].get("fish_api_key") or "").strip():
+        return "fleet"
+    if os.environ.get("FISH_API_KEY"):
+        return "env"
+    return None
+
+
+def fish_settings():
+    """(api key, default voice, model) - read fresh, so a key saved on the
+    page works on the next click rather than the next restart.
+
+    The add-on's own option wins, so one house can use a different account;
+    otherwise the house's fleet file, which is how every house gets the same
+    key without it ever being published."""
+    o, fleet = _options(), _fleet()[0]
+    key = str(o.get("fish_api_key") or fleet.get("fish_api_key") or os.environ.get("FISH_API_KEY") or "").strip()
     voice = str(o.get("fish_voice") or os.environ.get("FISH_VOICE") or DEFAULT_VOICE).strip()
     model = str(o.get("fish_model") or os.environ.get("FISH_MODEL") or DEFAULT_FISH_MODEL).strip()
     return key, voice, model
+
+
+def check_fish_key(key):
+    """Ask Fish whether a key works before keeping it. Returns the API-credit
+    balance as a string (or "" if Fish did not say); raises ClipError if the
+    key is refused. A network failure is not the key's fault and passes."""
+    import urllib.request
+    req = urllib.request.Request(FISH_WALLET_URL, headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read() or b"{}")
+    except Exception as e:
+        if getattr(e, "code", None) in (401, 403):
+            raise ClipError("Fish Audio refused that key")
+        return ""
+    credit = data.get("credit") if isinstance(data, dict) else None
+    return "" if credit is None else str(credit)
+
+
+def save_fleet_key(key):
+    """Keep a Fish key in the house's fleet file, merged with whatever else
+    is there (the Cloudflare token, the PIN), readable by root only."""
+    key = (key or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{16,128}", key):
+        raise ClipError("That does not look like a Fish Audio API key")
+    credit = check_fish_key(key)
+    data, path = _fleet()
+    if path is None:
+        path = FLEET_FILES[0]
+        if not os.path.isdir(os.path.dirname(path)):
+            raise ClipError("Home Assistant's config folder is not mapped into this add-on")
+    data["fish_api_key"] = key
+    tmp = path + ".part"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return {"path": path, "credit": credit}
 
 
 def _speed(speed):

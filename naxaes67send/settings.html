@@ -211,9 +211,10 @@ document.getElementById("save").onclick = async () => {
     try { voices = await (await fetch(base + "/voices", {headers: HH, cache: "no-store"})).json(); } catch (e) { voices = {voices: [], fish: false}; }
     const el = document.getElementById("fishstate");
     const opts = (voices.voices || []).map(v => `<option value="${esc(v.id)}" ${v.id === voices.default ? "selected" : ""}>${esc(v.name)} - ${esc(v.about)}</option>`).join("");
+    const where = {fleet: " (from this house's private fleet file)", options: " (typed into this add-on's options, which beats the fleet file)", env: ""}[voices.fish_source] || "";
     el.innerHTML = voices.fish
-      ? `<span class="ok">Fish Audio is set up.</span><label>Default voice for new announcements <select id="fishvoice">${opts}</select></label><button class="quiet" id="fishreplace">Replace key</button><span id="fishmsg" class="muted"></span>`
-      : `<span class="bad">No Fish Audio key yet</span> - without one, typed text uses Home Assistant's own speech and there is no choice of voice.<label>API key <input id="fishkey" type="password" autocomplete="off" style="min-width:16rem"></label><button class="quiet" id="fishsave">Save key</button><span id="fishmsg" class="muted"></span>`;
+      ? `<span class="ok">Fish Audio is set up${esc(where)}.</span><label>Default voice for new announcements <select id="fishvoice">${opts}</select></label><button class="quiet" id="fishreplace">Replace key</button><span id="fishmsg" class="muted"></span>`
+      : `<span class="bad">No Fish Audio key yet</span> - without one, typed text uses Home Assistant's own speech and there is no choice of voice. A key saved here is kept in this house's private fleet file, never in the add-on's public repository.<label>API key <input id="fishkey" type="password" autocomplete="off" style="min-width:16rem"></label><button class="quiet" id="fishsave">Save key</button><span id="fishmsg" class="muted"></span>`;
     const save = async (body, msg) => {
       const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify(body)})).json();
       document.getElementById("fishmsg").textContent = r.ok ? " " + msg : " " + (r.error || "failed");
@@ -223,21 +224,25 @@ document.getElementById("save").onclick = async () => {
       document.getElementById("fishvoice").onchange = e => save({fish_voice: e.target.value}, "saved");
       document.getElementById("fishreplace").onclick = () => { voices.fish = false; loadVoicesForm(); };
     } else {
-      document.getElementById("fishsave").onclick = async () => {
-        const k = document.getElementById("fishkey").value.trim();
-        if (!k) return;
-        if (await save({fish_api_key: k}, "saved")) loadVoices();
-      };
+      document.getElementById("fishsave").onclick = () => saveKey();
     }
   }
   function loadVoicesForm() {
     document.getElementById("fishstate").innerHTML = `<label>New API key <input id="fishkey" type="password" autocomplete="off" style="min-width:16rem"></label><button class="quiet" id="fishsave">Save key</button><button class="quiet" id="fishcancel">Cancel</button><span id="fishmsg" class="muted"></span>`;
     document.getElementById("fishcancel").onclick = loadVoices;
-    document.getElementById("fishsave").onclick = async () => {
-      const k = document.getElementById("fishkey").value.trim(); if (!k) return;
-      const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify({fish_api_key: k})})).json();
-      if (r.ok) loadVoices(); else document.getElementById("fishmsg").textContent = " " + (r.error || "failed");
-    };
+    document.getElementById("fishsave").onclick = () => saveKey();
+  }
+  // The key goes into the house's private fleet file, not the add-on's
+  // options, and only once Fish has accepted it.
+  async function saveKey() {
+    const k = document.getElementById("fishkey").value.trim(); if (!k) return;
+    const msg = document.getElementById("fishmsg"); msg.textContent = " checking the key with Fish...";
+    try {
+      const r = await (await fetch(base + "/fleetkey", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify({fish_api_key: k})})).json();
+      if (!r.ok) { msg.textContent = " " + (r.error || "failed"); return; }
+      await loadVoices();
+      document.getElementById("fishmsg").textContent = r.credit ? " saved - API credit: " + r.credit : " saved";
+    } catch (e) { msg.textContent = " failed: " + e; }
   }
   function showSounds(sounds) {
     const el = document.getElementById("sounds");

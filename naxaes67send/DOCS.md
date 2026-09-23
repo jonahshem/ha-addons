@@ -110,8 +110,15 @@ box, a speed slider (0.5x-2x), a voice, **Play** to hear it in the browser, and
 **Regenerate** to replace the clip's audio. The clip keeps its id, name, tile
 setting and sounds, so Crestron programming that plays it is unaffected.
 
-* **Speech is Fish Audio** when `fish_api_key` is set (Options, or pasted on
-  the page) - the engine the shipped set was made with. It is a *developer*
+* **Speech is Fish Audio** when a key is found - the engine the shipped set
+  was made with. The key lives in the house's private
+  **`/config/.bav_fleet.json`** as `fish_api_key` - the file the image seeder
+  writes and `bav_house` reads its Cloudflare token from - so every house can
+  share one key without it being in this public repository. A seeded house has
+  it from the start; on any other house, paste it once into the page's key box,
+  which checks it with Fish and writes it into that file (mode 600). A
+  `fish_api_key` typed into this add-on's own options overrides the file, for a
+  house on a different account. It is a *developer*
   key, billed from the API-credit wallet, which is separate from any
   subscription: a `402` means that wallet is empty. Without a key, typed text
   falls back to Home Assistant's TTS, then espeak-ng, with no choice of voice.
@@ -134,6 +141,7 @@ GET  /voices                                the choices, the default, whether Fi
 GET  /cliptext?id=                          what a clip says
 POST /tts?text=&voice=&speed=               speak without saving (the editor's Play)
 POST /clipregen?id=&text=&voice=&speed=     speak new words into an existing clip
+POST /fleetkey  {fish_api_key}              check a key with Fish, keep it in the fleet file
 ```
 
 ## The zone list is the house's, not the rack's

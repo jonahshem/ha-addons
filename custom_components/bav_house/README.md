@@ -51,9 +51,15 @@ the image seeder writes:
   "cf_api_token": "…",
   "cf_account_id": "…",
   "zone": "bav.homes",
-  "device_pin": "2129918115"
+  "device_pin": "2129918115",
+  "fish_api_key": "…"
 }
 ```
+
+`fish_api_key` is not this integration's: the NAX AES67 Sender add-on reads it
+(the add-on maps the config folder), so every house speaks announcements with
+the same Fish Audio account without the key being published. Its page can also
+write it into this file on a house that was not seeded.
 
 The form shows them as already answered, with a **Change the Cloudflare account**
 tick that reveals the fields.
