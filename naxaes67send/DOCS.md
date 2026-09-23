@@ -95,6 +95,47 @@ The eight door, gate and delivery lines ship set to ring the doorbell first.
 A recorded-on-the-spot announcement has no clip, so it takes the request or
 the house default.
 
+Eight sounds ship: `ding-dong`, `chime`, and since 0.13.0 `westminster`
+(the Westminster Quarters, E C D G / G D E C), `three-chime`, `tubular-bells`,
+`marimba`, `old-bell` (a mechanical ringer) and `electronic` (a two-tone
+bing-bong). They are synthesised in plain Python by `tools/make_sounds.py` -
+re-run it to change one, then commit the WAVs. The page's **Doorbell & chime
+sounds** card plays each one in the browser, and the house-default selects
+have a Play beside them; nothing is sent to the speakers.
+
+## Editing what an announcement says
+
+Every clip that is words (not a sound) has an **Edit** button: the text in a
+box, a speed slider (0.5x-2x), a voice, **Play** to hear it in the browser, and
+**Regenerate** to replace the clip's audio. The clip keeps its id, name, tile
+setting and sounds, so Crestron programming that plays it is unaffected.
+
+* **Speech is Fish Audio** when `fish_api_key` is set (Options, or pasted on
+  the page) - the engine the shipped set was made with. It is a *developer*
+  key, billed from the API-credit wallet, which is separate from any
+  subscription: a `402` means that wallet is empty. Without a key, typed text
+  falls back to Home Assistant's TTS, then espeak-ng, with no choice of voice.
+* **Voices:** Jarvis (the shipped set's voice, and the default - `fish_voice`
+  changes the house default) plus eight more, chosen from fish.audio's public
+  English voices by use: the seven "Fish Official" voices in the top 400
+  (Sarah, Adrian, Selene, Ethan, Hannah, Jordan, Laura) and the most-used calm
+  British narrator. The raw top of that list is game announcers, meme voices
+  and clones of real people, which were passed over.
+* **What Play heard is what Regenerate saves.** Fish never reads a sentence the
+  same way twice, so the last few takes are kept in memory and Regenerate
+  reuses the matching one instead of asking again.
+* **The shipped clips never had their words saved.** The first time one is
+  opened in the editor it is transcribed (Fish speech-to-text, same key) and
+  the text kept in its `.json`, so it is paid for once. Without a key the box
+  starts with the clip's name.
+
+```
+GET  /voices                                the choices, the default, whether Fish is set up
+GET  /cliptext?id=                          what a clip says
+POST /tts?text=&voice=&speed=               speak without saving (the editor's Play)
+POST /clipregen?id=&text=&voice=&speed=     speak new words into an existing clip
+```
+
 ## The zone list is the house's, not the rack's
 
 `GET /zones` - what the driver's Announcements page, HomeUI and the settings

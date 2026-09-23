@@ -10,6 +10,10 @@ same flat LAN as everything else.
     POST /discover        {host, user, password} -> that amplifier's zones
     POST /announce        audio in the body, zones in the query -> speak
     POST /repair          put back any zone left on the announcement input
+    GET  /voices          the voices the clip editor offers, and whether Fish is set up
+    GET  /cliptext?id=    what a clip says (typed, or transcribed once and kept)
+    POST /tts?text=&voice=&speed=      speak without saving - the editor's Play
+    POST /clipregen?id=&text=&voice=&speed=   speak new words into an existing clip
 
 **A house can have more than one amplifier**, and most of the shape here comes
 from that. Zones are named `<host>:ZoneN` throughout, because `Zone4` alone
@@ -446,6 +450,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if tail == "/clips":
             return self._json({"ok": True, "clips": clips.list_clips()})
+        if tail == "/clipaudio":
+            # The page's Play buttons fetch this with a GET. Until 0.13.0 it
+            # was routed for POST only, so every Play on the page was a 404.
+            return self._clip_audio()
+        if tail == "/voices":
+            key, voice, _model = clips.fish_settings()
+            return self._json({"ok": True, "voices": clips.VOICES, "default": voice,
+                               # Never the key itself - only whether there is one.
+                               "fish": bool(key),
+                               "speed": {"min": clips.SPEED_MIN, "max": clips.SPEED_MAX}})
+        if tail == "/cliptext":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                return self._json(dict(clips.clip_text((q.get("id", [""])[0] or "").strip(), log=log), ok=True))
+            except clips.ClipError as e:
+                return self._fail(str(e))
 
         return self._json({"error": "Not found"}, 404)
 
@@ -476,6 +496,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._delete_clip()
         if tail == "/clipfacing":
             return self._clip_facing()
+        if tail == "/tts":
+            return self._tts_preview()
+        if tail == "/clipregen":
+            return self._clip_regen()
         return self._json({"error": "Not found"}, 404)
 
     def _save_config(self):
@@ -500,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                                          for g in want["speaker_groups"] if g.get("name")]
         if "default_percent" in want:
             options["default_percent"] = int(want["default_percent"])
-        for key in ("chime_before", "chime_after"):
+        for key in ("chime_before", "chime_after", "fish_api_key", "fish_voice"):
             if key in want:
                 options[key] = str(want[key] or "").strip()
         req = urllib.request.Request("http://supervisor/addons/self/options", method="POST",
@@ -973,7 +997,9 @@ class Handler(BaseHTTPRequestHandler):
         facing = (q.get("user_facing", ["true"])[0] or "true").strip().lower() not in ("0", "false", "no")
         try:
             if text:
-                clip_id = clips.speak_to_clip(name or text, text, user_facing=facing)
+                clip_id = clips.speak_to_clip(name or text, text, user_facing=facing,
+                                              voice=(q.get("voice", [""])[0] or "").strip() or None,
+                                              speed=q.get("speed", ["1"])[0])
             else:
                 blob = self._body(clips.MAX_BYTES + 1)
                 clip_id = clips.save_audio(name, blob, user_facing=facing)
@@ -997,6 +1023,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _tts_preview(self):
+        """Speak without saving: the editor's Play. The take is remembered, so
+        a Regenerate straight after saves the same reading that was heard."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            audio, engine = clips.synthesize((q.get("text", [""])[0] or ""),
+                                             (q.get("voice", [""])[0] or "").strip() or None,
+                                             q.get("speed", ["1"])[0])
+        except clips.ClipError as e:
+            return self._fail(str(e))
+        except Exception as e:
+            return self._fail("%s: %s" % (type(e).__name__, e))
+        head = audio[:4]
+        ctype = "audio/wav" if head == b"RIFF" else "audio/mpeg"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(audio)))
+        self.send_header("X-Speech-Engine", engine)
+        self.end_headers()
+        self.wfile.write(audio)
+
+    def _clip_regen(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        clip_id = (q.get("id", [""])[0] or "").strip()
+        try:
+            clips.regenerate_clip(clip_id, (q.get("text", [""])[0] or ""),
+                                  (q.get("voice", [""])[0] or "").strip() or None,
+                                  q.get("speed", ["1"])[0])
+        except clips.ClipError as e:
+            return self._fail(str(e))
+        except Exception as e:
+            return self._fail("%s: %s" % (type(e).__name__, e))
+        log("[clips] regenerated %s" % clip_id)
+        return self._json({"ok": True, "id": clip_id, "clips": clips.list_clips()})
 
     def _clip_chime(self):
         """What plays before/after one clip: `before=` / `after=` each a clip

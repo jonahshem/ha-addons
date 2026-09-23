@@ -146,7 +146,7 @@ def seed_bundled(bundled_dir=BUNDLED_DIR, seeded_file=SEEDED_FILE, log=print):
             # exists, and is kept. A clip the house made itself is untouched.
             have = _read_meta(clip_id)
             if have.get("source") == "bundled":
-                new = {k: meta[k] for k in ("before", "after", "sound") if k in meta and k not in have}
+                new = {k: meta[k] for k in ("before", "after", "sound", "text") if k in meta and k not in have}
                 if new:
                     _write_meta(clip_id, **dict(have, **new))
                     log(f"[clips] {clip_id}: shipped setting adopted: {new}")
@@ -160,7 +160,7 @@ def seed_bundled(bundled_dir=BUNDLED_DIR, seeded_file=SEEDED_FILE, log=print):
         os.replace(tmp, os.path.join(CLIPS_DIR, fn))
         fields = {"name": meta.get("name") or clip_id.replace("-", " ").title(),
                   "source": "bundled", "user_facing": bool(meta.get("user_facing", True))}
-        for key in ("sound", "before", "after"):
+        for key in ("sound", "before", "after", "text"):
             if key in meta:
                 fields[key] = meta[key]
         _write_meta(clip_id, **fields)
@@ -219,6 +219,11 @@ def list_clips():
             # "" = nothing, else a clip id (normally one of the sounds).
             "before": meta.get("before"),
             "after": meta.get("after"),
+            # What it says, when known, and how it was spoken - for the
+            # editor. None until the clip has been typed or transcribed.
+            "text": meta.get("text"),
+            "voice": meta.get("voice"),
+            "speed": meta.get("speed"),
             "bytes": size,
             # Only meaningful for uncompressed PCM. A clip that arrived as mp3
             # (Fish returns nothing else) is a tenth the size for the same
@@ -343,10 +348,100 @@ def delete_clip(clip_id):
 
 # -- speech ----------------------------------------------------------------
 #
-# Two backends, tried in order. Home Assistant first because the house has
-# already chosen a voice there and it is almost always a better one than
-# anything this container would ship; espeak-ng second because it is offline,
+# Fish Audio first when a key is set: it is the voice the shipped clips were
+# made in (the "Jarvis" voice), so a clip regenerated here sounds like its
+# neighbours, and it is the only engine here with a choice of voices and a
+# speed that does not warp the pitch. Then Home Assistant, because the house
+# has already chosen a voice there; then espeak-ng, because it is offline,
 # tiny, and cannot be unavailable.
+
+FISH_TTS_URL = "https://api.fish.audio/v1/tts"
+FISH_ASR_URL = "https://api.fish.audio/v1/asr"
+# The voice every shipped clip was spoken in. Public on fish.audio.
+DEFAULT_VOICE = "049975dde0a14889ad219f24a95e3a4f"
+# The alternatives on the editor. Chosen 2026-09-23 from fish.audio's public
+# English voices sorted by use: the seven "Fish Official" voices in the top
+# 400, plus the most-used calm British narrator. The top of that list by raw
+# count is game announcers, meme voices and clones of real people - none of
+# which belongs on a client's ceiling speakers - so they were passed over.
+VOICES = [
+    {"id": DEFAULT_VOICE, "name": "Jarvis (default)", "about": "clear, authoritative male"},
+    {"id": "933563129e564b19a115bedd57b7406a", "name": "Sarah", "about": "young female, conversational"},
+    {"id": "bf322df2096a46f18c579d0baa36f41d", "name": "Adrian", "about": "male narrator, deep and steady"},
+    {"id": "b347db033a6549378b48d00acb0d06cd", "name": "Selene", "about": "female, soft and calm"},
+    {"id": "536d3a5e000945adb7038665781a4aca", "name": "Ethan", "about": "male, clear explainer"},
+    {"id": "9a9cf47702da476aa4629e2506d4a857", "name": "Hannah", "about": "female, professional"},
+    {"id": "79d0bd3e4e5444b18f7b6d89b5927bf1", "name": "Jordan", "about": "older male, confident"},
+    {"id": "e3cd384158934cc9a01029cd7d278634", "name": "Laura", "about": "female narrator, warm"},
+    {"id": "beb44e5fac1e4b33a15dfcdcc2a9421d", "name": "Historian", "about": "British male, calm"},
+]
+SPEED_MIN, SPEED_MAX = 0.5, 2.0
+DEFAULT_FISH_MODEL = "s2.1-pro"
+FISH_FALLBACK_MODEL = "s1"
+
+OPTIONS_FILES = (os.environ.get("SETTINGS_FILE", "/data/settings.json"),
+                 os.environ.get("OPTIONS_FILE", "/data/options.json"))
+
+
+def fish_settings():
+    """(api key, default voice, model) - read fresh, so a key pasted on the
+    page works on the next click rather than the next restart."""
+    o = {}
+    for path in OPTIONS_FILES:
+        try:
+            with open(path) as fh:
+                o = json.load(fh)
+            break
+        except Exception:
+            continue
+    key = str(o.get("fish_api_key") or os.environ.get("FISH_API_KEY") or "").strip()
+    voice = str(o.get("fish_voice") or os.environ.get("FISH_VOICE") or DEFAULT_VOICE).strip()
+    model = str(o.get("fish_model") or os.environ.get("FISH_MODEL") or DEFAULT_FISH_MODEL).strip()
+    return key, voice, model
+
+
+def _speed(speed):
+    try:
+        v = float(speed)
+    except (TypeError, ValueError):
+        return 1.0
+    if v != v:                      # NaN
+        return 1.0
+    return round(max(SPEED_MIN, min(SPEED_MAX, v)), 2)
+
+
+def _fish_error(e):
+    code = getattr(e, "code", None)
+    if code == 402:
+        # The JARVIS gotcha: the developer API bills from its own wallet, not
+        # the subscription. A funded subscription still gets this.
+        return "Fish Audio is out of API credit (fish.audio/app/developers - separate from the subscription)"
+    if code == 401:
+        return "Fish Audio refused the API key"
+    return "Fish Audio did not answer (%s)" % (code or type(e).__name__)
+
+
+def _tts_via_fish(text, voice, speed, key, model):
+    import urllib.request
+    body = json.dumps({"text": text[:MAX_TEXT], "format": "mp3", "reference_id": voice,
+                       "normalize": True, "prosody": {"speed": speed, "volume": 0}}).encode()
+    last = None
+    for m in dict.fromkeys([model, FISH_FALLBACK_MODEL]):
+        req = urllib.request.Request(FISH_TTS_URL, data=body, method="POST", headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json",
+            # Fish reads the model from this header, not the body.
+            "model": m})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                audio = r.read()
+            if audio:
+                return audio
+        except Exception as e:
+            last = e
+            if getattr(e, "code", None) in (401, 402):
+                break               # the other model will not do better
+    raise ClipError(_fish_error(last) if last else "Fish Audio returned no audio")
+
 
 def _tts_via_home_assistant(text):
     token = os.environ.get("SUPERVISOR_TOKEN")
@@ -370,24 +465,143 @@ def _tts_via_home_assistant(text):
         return None
 
 
-def _tts_via_espeak(text):
+def _tts_via_espeak(text, speed=1.0):
     try:
         out = subprocess.run(
-            ["espeak-ng", "-s", "150", "-w", "/dev/stdout", text[:MAX_TEXT]],
+            ["espeak-ng", "-s", str(int(150 * speed)), "-w", "/dev/stdout", text[:MAX_TEXT]],
             capture_output=True, timeout=30)
         return out.stdout or None
     except Exception:
         return None
 
 
-def speak_to_clip(name, text, user_facing=True):
-    """Synthesise `text` and keep it as a clip. Returns the clip id."""
+# The last few things spoken, so Regenerate saves exactly the take that was
+# just previewed. Fish does not say a sentence the same way twice; a person who
+# liked what they heard must not get a different reading saved.
+_recent = {}
+_RECENT_MAX = 6
+
+
+def synthesize(text, voice=None, speed=1.0):
+    """Speak `text`. Returns (audio bytes, a word about who spoke it)."""
     text = (text or "").strip()
     if not text:
         raise ClipError("Nothing to say")
     if len(text) > MAX_TEXT:
         raise ClipError("That is more than a page's worth of words")
-    audio = _tts_via_home_assistant(text) or _tts_via_espeak(text)
-    if not audio:
-        raise ClipError("No speech engine answered - is espeak-ng installed?")
-    return save_audio(name or text, audio, source="spoken", user_facing=user_facing)
+    key, default_voice, model = fish_settings()
+    speed = _speed(speed)
+    voice = (voice or "").strip() or default_voice
+    if key:
+        if not re.fullmatch(r"[0-9a-f]{32}", voice):
+            raise ClipError("That is not a Fish Audio voice id")
+        k = (text, voice, speed)
+        if k in _recent:
+            return _recent[k], "fish"
+        audio = _tts_via_fish(text, voice, speed, key, model)
+        _recent[k] = audio
+        while len(_recent) > _RECENT_MAX:
+            _recent.pop(next(iter(_recent)))
+        return audio, "fish"
+    audio = _tts_via_home_assistant(text)
+    if audio:
+        return audio, "home-assistant"
+    audio = _tts_via_espeak(text, speed)
+    if audio:
+        return audio, "espeak"
+    raise ClipError("No speech engine answered - add a Fish Audio key, or install espeak-ng")
+
+
+def speak_to_clip(name, text, user_facing=True, voice=None, speed=1.0):
+    """Synthesise `text` and keep it as a clip. Returns the clip id."""
+    audio, engine = synthesize(text, voice, speed)
+    clip_id = save_audio(name or text, audio, source="spoken", user_facing=user_facing)
+    meta = _read_meta(clip_id)
+    meta.update(text=text.strip(), speed=_speed(speed))
+    if engine == "fish":
+        meta["voice"] = (voice or "").strip() or fish_settings()[1]
+    _write_meta(clip_id, **meta)
+    return clip_id
+
+
+def regenerate_clip(clip_id, text, voice=None, speed=1.0):
+    """Speak new words into an existing clip, keeping everything else about it
+    - its id (so Crestron programming that plays it still finds it), its name,
+    whether it is on the tile, and the sounds around it."""
+    clip_id = _slug(clip_id)
+    p = path_for(clip_id)
+    if not p:
+        raise ClipError("No such clip")
+    meta = _read_meta(clip_id)
+    if meta.get("sound"):
+        raise ClipError("That is a sound, not words")
+    audio, engine = synthesize(text, voice, speed)
+    tmp = os.path.join(CLIPS_DIR, "." + clip_id + ".part")
+    with open(tmp, "wb") as fh:
+        fh.write(audio)
+    os.replace(tmp, p)
+    meta.update(text=text.strip(), speed=_speed(speed), source="spoken", text_source="typed")
+    if engine == "fish":
+        meta["voice"] = (voice or "").strip() or fish_settings()[1]
+    else:
+        meta.pop("voice", None)
+    _write_meta(clip_id, **meta)
+    return clip_id
+
+
+def _multipart(fields, files):
+    boundary = "----naxclip" + os.urandom(8).hex()
+    out = []
+    for k, v in fields.items():
+        out.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                    % (boundary, k, v)).encode())
+    for k, (fname, ctype, data) in files.items():
+        out.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+                    "Content-Type: %s\r\n\r\n" % (boundary, k, fname, ctype)).encode() + data + b"\r\n")
+    out.append(("--%s--\r\n" % boundary).encode())
+    return b"".join(out), "multipart/form-data; boundary=" + boundary
+
+
+def _transcribe(path, key):
+    import urllib.request
+    with open(path, "rb") as fh:
+        audio = fh.read()
+    body, ctype = _multipart({"language": "en", "ignore_timestamps": "true"},
+                             {"audio": ("clip", content_type(path), audio)})
+    req = urllib.request.Request(FISH_ASR_URL, data=body, method="POST", headers={
+        "Authorization": "Bearer " + key, "Content-Type": ctype})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return (json.loads(r.read()).get("text") or "").strip()
+
+
+def clip_text(clip_id, log=print):
+    """What a clip says, for the editor: {text, from}.
+
+    Stored text if there is any. The 36 shipped clips were recorded before the
+    words were kept, so the first time one is opened it is transcribed (Fish
+    speech-to-text, same key) and the result kept beside it - a clip is heard
+    once and never paid for again. Without a key, or if that fails, the clip's
+    name, which for most of them is close to the words anyway.
+    """
+    clip_id = _slug(clip_id)
+    p = path_for(clip_id)
+    if not p:
+        raise ClipError("No such clip")
+    meta = _read_meta(clip_id)
+    if meta.get("text"):
+        return {"text": meta["text"], "from": meta.get("text_source") or "typed",
+                "voice": meta.get("voice"), "speed": meta.get("speed") or 1.0}
+    name = meta.get("name") or clip_id.replace("-", " ").title()
+    key = fish_settings()[0]
+    if key:
+        try:
+            text = _transcribe(p, key)
+        except Exception as e:
+            log(f"[clips] {clip_id}: could not transcribe ({_fish_error(e)})")
+            text = ""
+        if text:
+            meta.update(text=text, text_source="transcribed")
+            _write_meta(clip_id, **meta)
+            log(f"[clips] {clip_id}: transcribed and kept")
+            return {"text": text, "from": "transcribed", "voice": meta.get("voice"), "speed": meta.get("speed") or 1.0}
+    return {"text": name, "from": "name", "voice": meta.get("voice"), "speed": meta.get("speed") or 1.0}

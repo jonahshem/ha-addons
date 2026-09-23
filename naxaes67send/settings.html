@@ -19,6 +19,13 @@
   .muted{color:var(--mute)} .ok{color:var(--ok)} .bad{color:var(--bad)}
   #status{margin:.8rem 0;min-height:1.4em}
   code{background:#eef1f4;padding:0 .3rem;border-radius:.25rem}
+  .sounds{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
+  .sound{display:flex;align-items:center;justify-content:space-between;gap:.5rem;border:1px solid var(--line);border-radius:.4rem;padding:.4rem .6rem}
+  button.play{min-width:4.2rem} button.play.on{background:var(--accent);color:#fff}
+  tr.editor td{background:#f9fafb;padding:.7rem .8rem}
+  tr.editor textarea{width:100%;box-sizing:border-box;min-height:4.2rem;padding:.4rem .5rem;border:1px solid var(--line);border-radius:.3rem;font:inherit;resize:vertical}
+  tr.editor input[type=range]{width:11rem;vertical-align:middle}
+  .speedval{display:inline-block;min-width:3rem;font-variant-numeric:tabular-nums}
 </style>
 <main>
   <h1>Announcements &amp; paging - speakers</h1>
@@ -33,9 +40,16 @@
     <div class="row"><label>or speak this text <input id="cliptext" type="text" placeholder="The pool gate is open" style="width:22rem"></label><button class="quiet" id="clipspeak">Make it</button></div>
     <div class="row"><label><input id="clipfacing" type="checkbox" checked> Show on the tile</label><span id="clipstatus" class="muted"></span></div>
   </div>
+  <h2>Doorbell &amp; chime sounds</h2>
+  <p class="muted">Sounds play before or after the words ("ding-dong, someone is at the front door"). Play one here to hear it on this device - nothing goes to the speakers.</p>
+  <div class="card"><div class="sounds" id="sounds"><span class="muted">reading...</span></div></div>
   <div class="card">
     <p class="muted" style="margin-top:0">A sound before or after every announcement - a doorbell, a chime. Each clip can override this in the list above (default / none / a sound).</p>
-    <div class="row"><label>Before every announcement <select id="chimebefore"></select></label><label>After <select id="chimeafter"></select></label><span id="chimestatus" class="muted"></span></div>
+    <div class="row"><label>Before every announcement <select id="chimebefore"></select></label><button class="quiet play" data-hear="chimebefore">Play</button><label>After <select id="chimeafter"></select></label><button class="quiet play" data-hear="chimeafter">Play</button><span id="chimestatus" class="muted"></span></div>
+  </div>
+  <div class="card" id="fishcard">
+    <p class="muted" style="margin-top:0">Voice: typed announcements, and the <b>Edit</b> button beside each one, are spoken by Fish Audio in the same voice as the shipped set.</p>
+    <div class="row" id="fishstate"><span class="muted">reading...</span></div>
   </div>
 
   <h2>Amplifiers</h2>
@@ -162,6 +176,129 @@ document.getElementById("save").onclick = async () => {
   const HH = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
   const esc = v => String(v ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const st = (m, bad) => { const e = document.getElementById("clipstatus"); e.textContent = " " + (m || ""); e.style.color = bad ? "var(--bad)" : ""; };
+  // One player for the whole page: pressing Play on anything stops whatever
+  // was playing, and pressing it again on the same thing stops it.
+  const player = new Audio(); let playingBtn = null, playingUrl = null;
+  function stopPlaying() {
+    player.pause();
+    if (playingBtn) { playingBtn.classList.remove("on"); playingBtn.textContent = playingBtn.dataset.label || "Play"; }
+    if (playingUrl) URL.revokeObjectURL(playingUrl);
+    playingBtn = null; playingUrl = null;
+  }
+  player.onended = stopPlaying;
+  async function playFrom(btn, fetcher) {
+    if (playingBtn === btn) { stopPlaying(); return; }
+    stopPlaying();
+    btn.dataset.label = btn.dataset.label || btn.textContent;
+    btn.textContent = "..."; btn.disabled = true;
+    try {
+      const r = await fetcher();
+      const ct = r.headers.get("Content-Type") || "";
+      if (!r.ok || ct.includes("json")) {
+        let msg = "could not get the audio";
+        try { msg = (await r.json()).error || msg; } catch (e) {}
+        btn.textContent = btn.dataset.label; return msg;
+      }
+      playingUrl = URL.createObjectURL(await r.blob()); player.src = playingUrl;
+      playingBtn = btn; btn.classList.add("on"); btn.textContent = "Stop";
+      await player.play();
+    } catch (e) { stopPlaying(); return String(e); }
+    finally { btn.disabled = false; }
+  }
+  const clipAudio = id => () => fetch(base + "/clipaudio?id=" + encodeURIComponent(id), {headers: HH});
+  let voices = null;
+  async function loadVoices() {
+    try { voices = await (await fetch(base + "/voices", {headers: HH, cache: "no-store"})).json(); } catch (e) { voices = {voices: [], fish: false}; }
+    const el = document.getElementById("fishstate");
+    const opts = (voices.voices || []).map(v => `<option value="${esc(v.id)}" ${v.id === voices.default ? "selected" : ""}>${esc(v.name)} - ${esc(v.about)}</option>`).join("");
+    el.innerHTML = voices.fish
+      ? `<span class="ok">Fish Audio is set up.</span><label>Default voice for new announcements <select id="fishvoice">${opts}</select></label><button class="quiet" id="fishreplace">Replace key</button><span id="fishmsg" class="muted"></span>`
+      : `<span class="bad">No Fish Audio key yet</span> - without one, typed text uses Home Assistant's own speech and there is no choice of voice.<label>API key <input id="fishkey" type="password" autocomplete="off" style="min-width:16rem"></label><button class="quiet" id="fishsave">Save key</button><span id="fishmsg" class="muted"></span>`;
+    const save = async (body, msg) => {
+      const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify(body)})).json();
+      document.getElementById("fishmsg").textContent = r.ok ? " " + msg : " " + (r.error || "failed");
+      return r.ok;
+    };
+    if (voices.fish) {
+      document.getElementById("fishvoice").onchange = e => save({fish_voice: e.target.value}, "saved");
+      document.getElementById("fishreplace").onclick = () => { voices.fish = false; loadVoicesForm(); };
+    } else {
+      document.getElementById("fishsave").onclick = async () => {
+        const k = document.getElementById("fishkey").value.trim();
+        if (!k) return;
+        if (await save({fish_api_key: k}, "saved")) loadVoices();
+      };
+    }
+  }
+  function loadVoicesForm() {
+    document.getElementById("fishstate").innerHTML = `<label>New API key <input id="fishkey" type="password" autocomplete="off" style="min-width:16rem"></label><button class="quiet" id="fishsave">Save key</button><button class="quiet" id="fishcancel">Cancel</button><span id="fishmsg" class="muted"></span>`;
+    document.getElementById("fishcancel").onclick = loadVoices;
+    document.getElementById("fishsave").onclick = async () => {
+      const k = document.getElementById("fishkey").value.trim(); if (!k) return;
+      const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify({fish_api_key: k})})).json();
+      if (r.ok) loadVoices(); else document.getElementById("fishmsg").textContent = " " + (r.error || "failed");
+    };
+  }
+  function showSounds(sounds) {
+    const el = document.getElementById("sounds");
+    if (!sounds.length) { el.innerHTML = '<span class="muted">No sounds. A clip flagged as a sound shows here.</span>'; return; }
+    el.innerHTML = sounds.map(x => `<div class="sound"><span>${esc(x.name)}<br><code style="font-size:.75rem">${esc(x.id)}</code></span><button class="quiet play" data-sound="${esc(x.id)}">Play</button></div>`).join("");
+    el.querySelectorAll("[data-sound]").forEach(b => b.onclick = async () => { const err = await playFrom(b, clipAudio(b.dataset.sound)); if (err) st(err, true); });
+  }
+  // The editor: the words, a speed, a voice; Play to hear it here, Regenerate
+  // to replace the clip's audio. The clip keeps its id, so Crestron programming
+  // that plays it keeps working.
+  async function openEditor(tr, c) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains("editor")) { next.remove(); return; }
+    if (!voices) await loadVoices();
+    const ed = document.createElement("tr"); ed.className = "editor";
+    const cols = tr.children.length;
+    ed.innerHTML = `<td colspan="${cols}"><span class="muted">reading what it says...</span></td>`;
+    tr.after(ed);
+    let info = {};
+    try { info = await (await fetch(base + "/cliptext?id=" + encodeURIComponent(c.id), {headers: HH, cache: "no-store"})).json(); } catch (e) {}
+    const text = info.text || c.name;
+    const speed = Number(info.speed || c.speed || 1) || 1;
+    const voice = info.voice || c.voice || voices.default;
+    const vopts = (voices.voices || []).map(v => `<option value="${esc(v.id)}" ${v.id === voice ? "selected" : ""}>${esc(v.name)} - ${esc(v.about)}</option>`).join("");
+    const origin = {transcribed: "Heard from the recording - check it before regenerating.", name: "The words were never saved with this clip; this is its name." + (voices.fish ? "" : " Add a Fish Audio key and it will be transcribed instead."), typed: ""}[info.from] || "";
+    ed.firstElementChild.innerHTML = `
+      <textarea maxlength="500">${esc(text)}</textarea>
+      ${origin ? `<div class="muted" style="font-size:.85rem">${esc(origin)}</div>` : ""}
+      <div class="row">
+        <label>Speed <input type="range" min="${voices.speed ? voices.speed.min : 0.5}" max="${voices.speed ? voices.speed.max : 2}" step="0.05" value="${speed}"> <span class="speedval"></span></label>
+        <label>Voice <select class="evoice" ${voices.fish ? "" : "disabled title=\"needs a Fish Audio key\""}>${vopts}</select></label>
+        <button class="quiet play eplay">Play</button>
+        <button class="eregen">Regenerate</button>
+        <button class="quiet eclose">Close</button>
+        <span class="muted estatus"></span>
+      </div>`;
+    const ta = ed.querySelector("textarea"), rng = ed.querySelector("input[type=range]"), sv = ed.querySelector(".speedval");
+    const vsel = ed.querySelector(".evoice"), est = ed.querySelector(".estatus");
+    const say = (m, bad) => { est.textContent = " " + (m || ""); est.style.color = bad ? "var(--bad)" : ""; };
+    const showSpeed = () => { const v = Number(rng.value); sv.textContent = v.toFixed(2) + "x" + (v === 1 ? "" : v < 1 ? " slower" : " faster"); };
+    rng.oninput = showSpeed; showSpeed();
+    const q = () => "text=" + encodeURIComponent(ta.value.trim()) + "&speed=" + rng.value + (voices.fish ? "&voice=" + encodeURIComponent(vsel.value) : "");
+    ed.querySelector(".eclose").onclick = () => ed.remove();
+    ed.querySelector(".eplay").onclick = async (e) => {
+      if (!ta.value.trim()) { say("type what it should say", true); return; }
+      say(playingBtn === e.target ? "" : "speaking (a few seconds)...");
+      const err = await playFrom(e.target, () => fetch(base + "/tts?" + q(), {method: "POST", headers: HH}));
+      say(err || "", !!err);
+    };
+    ed.querySelector(".eregen").onclick = async (e) => {
+      if (!ta.value.trim()) { say("type what it should say", true); return; }
+      if (!confirm("Replace the audio of \"" + c.name + "\" with this?")) return;
+      e.target.disabled = true; say("regenerating...");
+      try {
+        const r = await (await fetch(base + "/clipregen?id=" + encodeURIComponent(c.id) + "&" + q(), {method: "POST", headers: HH})).json();
+        if (r.ok) { say("saved - this is what plays from now on"); st("regenerated " + c.id); }
+        else say(r.error || "failed", true);
+      } catch (err) { say("failed: " + err, true); }
+      finally { e.target.disabled = false; }
+    };
+  }
   async function showClips(list){
     const el = document.getElementById("clips");
     if (!list) { try { list = (await (await fetch(base + "/clips", {headers: HH, cache: "no-store"})).json()).clips || []; } catch(e) { el.innerHTML = '<span class="muted">could not read the clips</span>'; return; } }
@@ -171,7 +308,8 @@ document.getElementById("save").onclick = async () => {
       sounds.map(x => `<option value="${esc(x.id)}" ${v === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
     el.innerHTML = '<table><thead><tr><th>Name</th><th>id</th><th>from</th><th></th><th></th><th>before</th><th>after</th><th></th></tr></thead><tbody>' + list.map(c =>
       `<tr><td>${esc(c.name)}</td><td><code>${esc(c.id)}</code></td><td class="muted">${esc(c.source)}</td>` +
-      `<td><button class="quiet" data-play="${esc(c.id)}">Play</button></td>` +
+      `<td style="white-space:nowrap"><button class="quiet play" data-play="${esc(c.id)}">Play</button>` +
+      (c.sound ? "" : ` <button class="quiet" data-edit="${esc(c.id)}">Edit</button>`) + `</td>` +
       `<td><label><input type="checkbox" data-facing="${esc(c.id)}" ${c.user_facing ? "checked" : ""}> on tile</label></td>` +
       (c.sound ? "<td class=\"muted\" colspan=\"2\">a sound</td>"
                : `<td><select data-before="${esc(c.id)}" style="min-width:7rem">${opts(c.before)}</select></td><td><select data-after="${esc(c.id)}" style="min-width:7rem">${opts(c.after)}</select></td>`) +
@@ -193,12 +331,10 @@ document.getElementById("save").onclick = async () => {
         };
       }
     } catch(e) {}
-    el.querySelectorAll("[data-play]").forEach(b => b.onclick = async () => {
-      // through fetch, so the bearer (when there is one) goes with it
-      const r = await fetch(base + "/clipaudio?id=" + encodeURIComponent(b.dataset.play), {headers: HH});
-      if (!r.ok) { st("could not fetch that clip", true); return; }
-      new Audio(URL.createObjectURL(await r.blob())).play();
-    });
+    // through fetch, so the bearer (when there is one) goes with it
+    el.querySelectorAll("[data-play]").forEach(b => b.onclick = async () => { const err = await playFrom(b, clipAudio(b.dataset.play)); if (err) st(err, true); });
+    el.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openEditor(b.closest("tr"), list.find(c => c.id === b.dataset.edit)));
+    showSounds(sounds);
     el.querySelectorAll("[data-facing]").forEach(cb => cb.onchange = async () => {
       const r = await (await fetch(base + "/clipfacing?id=" + encodeURIComponent(cb.dataset.facing) + "&user_facing=" + (cb.checked ? "true" : "false"), {method: "POST", headers: HH})).json();
       st(r.ok ? (cb.checked ? "shown on the tile" : "hidden from the tile") : r.error, !r.ok);
@@ -231,6 +367,12 @@ document.getElementById("save").onclick = async () => {
       st(r.ok ? "saved as " + r.id : r.error, !r.ok); if (r.ok) showClips(r.clips);
     } catch(e) { st("failed: " + e, true); }
   };
+  document.querySelectorAll("[data-hear]").forEach(b => b.onclick = async () => {
+    const id = document.getElementById(b.dataset.hear).value;
+    if (!id) { document.getElementById("chimestatus").textContent = " none set"; return; }
+    const err = await playFrom(b, clipAudio(id)); if (err) st(err, true);
+  });
+  loadVoices();
   showClips();
 })();
 </script>
