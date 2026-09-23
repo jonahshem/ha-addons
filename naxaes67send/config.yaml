@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.13.1"
+version: "0.14.0"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64, amd64]
@@ -72,10 +72,12 @@ options:
   # Fish Audio (fish.audio) speaks typed announcements and regenerates clips
   # from the add-on's page - the voice the shipped clips were made in. The key
   # is a developer API key; it bills from the API-credit wallet, which is
-  # separate from any subscription. Normally left BLANK here: the key lives in
-  # the house's private /config/.bav_fleet.json (`fish_api_key`), written by
-  # the image seeder or by the page's key box, so it is never published. A
-  # key typed here overrides that file for this house only. With no key
+  # separate from any subscription. Normally left BLANK here: at every start
+  # the add-on fetches the key from our Hub (logs.bav.homes, gated by admin +
+  # the device PIN) and keeps it in the house's private
+  # /config/.bav_fleet.json, so it is never published and never typed. The
+  # page's key box writes that file too. A key typed here overrides it for
+  # this house only, and stops the fetch. With no key
   # anywhere, typed text falls back to Home Assistant's TTS, then espeak-ng.
   fish_api_key: ""
   # The voice a new clip is spoken in unless the editor picks another.
@@ -118,6 +120,7 @@ schema:
   fish_api_key: password?
   fish_voice: str?
   fish_model: str?
+  key_server: str?
   default_percent: int?
   zone_volumes:
     - zone: str

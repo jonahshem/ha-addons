@@ -482,6 +482,48 @@ def save_fleet_key(key):
     return {"path": path, "credit": credit}
 
 
+# Where a house gets the Fish key without anybody typing it: our Hub, asked at
+# every start (so every install and update), gated by `admin` + the device PIN.
+# The key is then kept in the fleet file above, so a house whose Hub is
+# unreachable at boot keeps speaking with the key it already has; a key
+# changed on the Hub reaches every house on its next restart.
+KEY_SERVER = os.environ.get("KEY_SERVER", "https://logs.bav.homes/house/fish-key")
+
+
+def fetch_fleet_key(pin, log=print, url=None):
+    """Ask the Hub for the Fish key and keep it in the fleet file. Returns
+    what happened, in words, for the log. Never raises."""
+    import base64
+    import urllib.request
+    url = KEY_SERVER if url is None else url
+    if not url:
+        return "key server disabled"
+    if fish_key_source() == "options":
+        return "a key is typed into this add-on's options; not asking the Hub"
+    if not pin:
+        return "no device PIN to ask the Hub with"
+    auth = base64.b64encode(("admin:" + pin).encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Basic " + auth,
+        # Cloudflare's bot rules 403 the default Python-urllib agent, which
+        # reads exactly like a wrong PIN.
+        "User-Agent": "naxaes67send (Home Assistant add-on)"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            key = str(json.loads(r.read()).get("fish_api_key") or "").strip()
+    except Exception as e:
+        return f"the Hub did not give the key ({getattr(e, 'code', None) or type(e).__name__})"
+    if not key:
+        return "the Hub answered without a key"
+    if _fleet()[0].get("fish_api_key") == key:
+        return "key from the Hub unchanged"
+    try:
+        save_fleet_key(key)
+    except (ClipError, OSError) as e:
+        return f"key from the Hub not kept: {e}"
+    return "key from the Hub saved to the fleet file"
+
+
 def _speed(speed):
     try:
         v = float(speed)

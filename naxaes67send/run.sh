@@ -29,6 +29,9 @@ export TAIL_SECONDS=$(get tail_seconds)
 export ANNOUNCE_VOLUME=$(get announce_volume)
 export CRPC_HOST=$(get crpc_host)
 export CRPC_PIN=$(get crpc_pin)
+# Where the Fish key is fetched from at start. Only when set: blank means the
+# built-in default (our Hub), and "off" turns the fetch off.
+KS=$(get key_server); [ -n "$KS" ] && export KEY_SERVER=$([ "$KS" = off ] && echo "" || echo "$KS")
 echo "===== NAX AES67 sender $(date) ====="
 echo "iface=${IFACE:-(auto)} mcast=$MCAST:$PORT session='$SESSION' api=$API_PORT"
 echo "lead=${LEAD_SECONDS:-1.5}s tail=${TAIL_SECONDS:-3.0}s announce_volume=${ANNOUNCE_VOLUME:-600}"

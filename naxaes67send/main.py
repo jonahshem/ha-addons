@@ -17,6 +17,12 @@ except Exception as e:
 
 pipe = sender.build()
 threading.Thread(target=api.serve, daemon=True).start()
+# The Fish key, from our Hub - at every start, so an install or an update is
+# all a house needs. Off the main thread: a slow Hub must not delay the stream.
+threading.Thread(
+    target=lambda: api.log("[clips] " + clips.fetch_fleet_key(
+        os.environ.get("AMP_PASSWORD") or os.environ.get("CRPC_PIN") or "", log=api.log)),
+    daemon=True).start()
 if (os.environ.get("AUTODETECT") or "true").lower() in ("1", "true", "yes", "on"):
     # At start and every six hours: a house whose options say `amps: []` and
     # whose rack holds six DM-NAX should not stay silent because nobody typed

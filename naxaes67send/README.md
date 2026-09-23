@@ -114,9 +114,14 @@ setting and sounds, so Crestron programming that plays it is unaffected.
   was made with. The key lives in the house's private
   **`/config/.bav_fleet.json`** as `fish_api_key` - the file the image seeder
   writes and `bav_house` reads its Cloudflare token from - so every house can
-  share one key without it being in this public repository. A seeded house has
-  it from the start; on any other house, paste it once into the page's key box,
-  which checks it with Fish and writes it into that file (mode 600). A
+  share one key without it being in this public repository. **Nobody types it:**
+  at every start (every install and update) the add-on asks our Hub,
+  `https://logs.bav.homes/house/fish-key`, with HTTP Basic `admin` + the device
+  PIN (`amp_password`, else `crpc_pin`), checks the answer with Fish, and keeps
+  it in that file (mode 600). A Hub that is down at boot costs nothing - the
+  house keeps the key it has - and a key changed on the Hub reaches every house
+  on its next restart. `key_server` in the options points elsewhere, or `off`
+  stops the fetch. The page's key box writes the same file by hand. A
   `fish_api_key` typed into this add-on's own options overrides the file, for a
   house on a different account. It is a *developer*
   key, billed from the API-credit wallet, which is separate from any
