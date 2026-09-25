@@ -74,3 +74,28 @@ def targets_only(refs):
     room-only placeholders that nothing can."""
     real = [r for r in refs if not str(r).startswith("room:")]
     return real, [r for r in refs if str(r).startswith("room:")]
+
+
+def rehome(roomonly, zones):
+    """Find today's speakers for rooms the caller named as `room:ID`.
+
+    A caller that cached the zone list while an amplifier was not answering
+    holds that room as `room:ID` ("no speakers") even after the amplifier is
+    back - the NaxAnnounce driver did exactly that at 110 Roosevelt
+    (2026-09-25): "Common Areas - First Floor" was .51:Zone6 in the live list
+    and the doorbell still sent `room:52018` and was refused. So the id is
+    looked up again in `zones` (a fresh `compose`) by `room_id`.
+
+    Returns (zone ids found, [room names or refs still without speakers]).
+    """
+    found, still = [], []
+    for ref in roomonly:
+        rid = str(ref)[len("room:"):]
+        hits = [zid for zid, v in zones.items()
+                if not str(zid).startswith("room:") and str((v or {}).get("room_id")) == rid]
+        if hits:
+            found.extend(h for h in hits if h not in found)
+        else:
+            v = zones.get(ref) or {}
+            still.append(v.get("room") or ref)
+    return found, still

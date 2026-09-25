@@ -227,7 +227,10 @@ _home = crpcmedia.CrestronHome(CRPC_HOST, CRPC_PIN, log=lambda m: log(m)) if CRP
 
 
 def log(msg):
-    print(msg, flush=True)
+    # Timestamped since 0.14.1: Home Assistant's add-on log shows none of its
+    # own, and "the client did not hear the doorbell at 11:18" could not be
+    # matched to a line. The Supervisor passes the house's TZ.
+    print(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg), flush=True)
 
 
 def amplifiers():
@@ -275,6 +278,54 @@ def split_zone(ref):
     if zone and not zone.startswith("Zone"):
         zone = f"Zone{zone}"
     return host, zone
+
+
+def house_zones(amps):
+    """The zone list `/zones` serves - every amplifier's zones shaped around
+    Crestron Home's rooms - with {host: why} for amplifiers that did not
+    answer, and the room count (None without a processor)."""
+    zones, trouble = {}, {}
+    for host, cfg in amps.items():
+        if not cfg.get("password"):
+            # Worth its own sentence: without it the amplifier answers
+            # 403, and `naxctl` reads a 403 as the Origin trap - which
+            # is the right guess when a password *was* given and
+            # exactly the wrong thing to tell somebody who has not
+            # typed one yet.
+            trouble[host] = "No password is saved for this amplifier"
+            continue
+        try:
+            # Through the pool as well, so the tile's list is served by
+            # the same session a page uses instead of logging in again.
+            try:
+                nax = _pool.get(host, cfg)
+                listing = nax.zones()
+            except Exception:
+                _pool.drop(host)
+                nax = _pool.get(host, cfg)
+                listing = nax.zones()
+            for zone, info in listing.items():
+                zones[f"{host}:{zone}"] = dict(
+                    info, host=host, zone=zone,
+                    # On our own input with nothing being announced -
+                    # a restore that did not take, and a silent room.
+                    stray=info.get("source") == naxctl.SOURCE)
+        except Exception as e:
+            # One unreachable amplifier must not hide the others; a
+            # house with two of them still pages through the one that
+            # is answering.
+            trouble[host] = f"{type(e).__name__}: {e}"
+    # Shaped like the house: Crestron Home's media rooms, in its
+    # order, each with its speakers; a bussed pair as one; a room
+    # whose speakers are not on any amplifier here still listed.
+    rooms = None
+    if _home is not None:
+        try:
+            rooms = _home.media_rooms()
+        except Exception as e:
+            log(f"[api] zones: processor did not give its rooms ({e}); amplifier order")
+    zones = zonelist.compose(zones, rooms)
+    return zones, trouble, rooms
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -405,47 +456,7 @@ class Handler(BaseHTTPRequestHandler):
         if tail == "/zones":
             if not amps:
                 return self._fail("No amplifier configured")
-            zones, trouble = {}, {}
-            for host, cfg in amps.items():
-                if not cfg.get("password"):
-                    # Worth its own sentence: without it the amplifier answers
-                    # 403, and `naxctl` reads a 403 as the Origin trap - which
-                    # is the right guess when a password *was* given and
-                    # exactly the wrong thing to tell somebody who has not
-                    # typed one yet.
-                    trouble[host] = "No password is saved for this amplifier"
-                    continue
-                try:
-                    # Through the pool as well, so the tile's list is served by
-                    # the same session a page uses instead of logging in again.
-                    try:
-                        nax = _pool.get(host, cfg)
-                        listing = nax.zones()
-                    except Exception:
-                        _pool.drop(host)
-                        nax = _pool.get(host, cfg)
-                        listing = nax.zones()
-                    for zone, info in listing.items():
-                        zones[f"{host}:{zone}"] = dict(
-                            info, host=host, zone=zone,
-                            # On our own input with nothing being announced -
-                            # a restore that did not take, and a silent room.
-                            stray=info.get("source") == naxctl.SOURCE)
-                except Exception as e:
-                    # One unreachable amplifier must not hide the others; a
-                    # house with two of them still pages through the one that
-                    # is answering.
-                    trouble[host] = f"{type(e).__name__}: {e}"
-            # Shaped like the house: Crestron Home's media rooms, in its
-            # order, each with its speakers; a bussed pair as one; a room
-            # whose speakers are not on any amplifier here still listed.
-            rooms = None
-            if _home is not None:
-                try:
-                    rooms = _home.media_rooms()
-                except Exception as e:
-                    log(f"[api] zones: processor did not give its rooms ({e}); amplifier order")
-            zones = zonelist.compose(zones, rooms)
+            zones, trouble, rooms = house_zones(amps)
             return self._json({"ok": True, "zones": zones, "trouble": trouble,
                                "rooms": len(rooms) if rooms is not None else None})
 
@@ -659,9 +670,21 @@ class Handler(BaseHTTPRequestHandler):
         # refused in words.
         refs, roomonly = zonelist.targets_only(refs)
         if roomonly:
-            log(f"[api] zones: {roomonly} have no speakers on any amplifier here")
-            if not refs:
-                return self._fail("Those rooms have no speakers on any amplifier here")
+            # Looked up again rather than trusted: the caller's list may be
+            # from a moment an amplifier was not answering (see rehome).
+            try:
+                live, trouble, _rooms = house_zones(amps)
+            except Exception as e:
+                live, trouble = {}, {"?": f"{type(e).__name__}: {e}"}
+            found, still = zonelist.rehome(roomonly, live)
+            if found:
+                log(f"[api] zones: {roomonly} found again as {found}")
+                refs = refs + [z for z in found if z not in refs]
+            if still:
+                why = f" ({'; '.join(f'{h}: {t}' for h, t in trouble.items())})" if trouble else ""
+                log(f"[api] zones: {', '.join(still)} - no speakers on any amplifier here{why}")
+                if not refs:
+                    return self._fail(f"{', '.join(still)}: no speakers on any amplifier here{why}")
         for ref in refs:
             if not ref.strip():
                 continue
