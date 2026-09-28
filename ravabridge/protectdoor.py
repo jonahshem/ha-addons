@@ -560,8 +560,13 @@ class ProtectCall:
 
     def _spawn(self, cmd, tag):
         try:
+            # Low priority: the video transcode shares the Pi with the NAX
+            # sender's 1 ms audio stream, and a doorbell picture that arrives
+            # a frame late is nothing next to a doorbell announcement that
+            # crackles. os.nice raises the nice value (lowers priority).
             p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                 preexec_fn=lambda: os.nice(10))
         except FileNotFoundError:
             self.log(f"protect: ffmpeg not found; cannot carry {tag}")
             return None

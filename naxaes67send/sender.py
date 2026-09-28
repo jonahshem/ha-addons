@@ -155,6 +155,14 @@ def _feed(appsrc):
     and `sync=true` on the sink; this thread only has to keep the queue fed,
     and `block=true` on the appsrc is what stops it running ahead.
     """
+    # Real-time round-robin for this one thread, so a video transcode or a
+    # clip decode starting on the same Pi cannot hold it off the CPU. Best
+    # effort: a kernel that refuses it still gets the bigger queue above.
+    try:
+        os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(10))
+        print("[sender] feeder thread is SCHED_RR 10", flush=True)
+    except Exception as e:
+        print(f"[sender] feeder thread stays normal priority ({e!r})", flush=True)
     while True:
         try:
             pcm = _pending.get_nowait()
@@ -219,18 +227,42 @@ def build():
     print("[sender] waiting for PTP sync (up to 45s)…", flush=True)
     print("[sender] PTP synced:", clock.wait_for_sync(45 * Gst.SECOND), flush=True)
 
+    # 🔴 The SDP must name THIS network's grandmaster. Until 0.14.2 `sap.GM`
+    # was a constant copied from 14 Malke's amplifier, so every other house
+    # advertised a clock it does not have - the DM-NAX still plays such a
+    # stream, but as one it cannot trust to its own clock. Read from the PTP
+    # clock we just synced to; the constant stays only as the fallback.
+    gm, gm_id = sap.GM, 0
+    try:
+        gm_id = int(clock.get_property("grandmaster-clock-id") or 0)
+        if gm_id:
+            gm = "-".join(f"{(gm_id >> (8 * (7 - i))) & 0xFF:02X}" for i in range(8))
+    except Exception as e:
+        print(f"[sender] grandmaster id not readable ({e!r}); advertising the default", flush=True)
+    print(f"[sender] PTP grandmaster: {gm}" + (" (default - NOT read from the network)" if gm == sap.GM and not gm_id else ""), flush=True)
+
+    # The stream is 1000 packets a second and the feeder is a Python thread:
+    # anything that holds the CPU for longer than the appsrc queue is a gap
+    # on the speakers. The add-on is granted SYS_NICE for exactly this.
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, -10)
+        print("[sender] process priority raised (nice -10)", flush=True)
+    except Exception as e:
+        print(f"[sender] could not raise priority ({e!r})", flush=True)
+
     sap.start(src_ip=src, mcast=MCAST, port=PORT, session_name=SESSION,
-              iface_ip=src, log=lambda m: print(m, flush=True))
+              iface_ip=src, gm=gm, log=lambda m: print(m, flush=True))
 
     # `block=true` with a small `max-bytes` is what paces the feeder: it
-    # blocks in push-buffer once about 30 ms is queued, so the thread runs at
+    # blocks in push-buffer once about 250 ms is queued (30 ms until 0.14.2 -
+    # too little slack on a Pi that also transcodes doorbell video), so the thread runs at
     # multicast-iface / bind-address: without them the multicast egress follows
     # whatever the host's default route happens to be, which on a box that also
     # runs VPN and bridge add-ons is not guaranteed to stay the house LAN. The
     # stream has exactly one correct interface; say so when it is known.
     # the speed the sink drains rather than the speed Python can loop.
     desc = (f"appsrc name=feed is-live=true format=time do-timestamp=false "
-            f"block=true max-bytes={FRAME_BYTES * 30} "
+            f"block=true max-bytes={FRAME_BYTES * 250} "
             f"caps=audio/x-raw,format=S24BE,rate={RATE},channels={CH},layout=interleaved "
             f"! audioconvert ! audioresample "
             f"! rtpL24pay pt={PT} min-ptime=1000000 max-ptime=1000000 mtu=1452 "

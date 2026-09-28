@@ -231,6 +231,7 @@ class EventsSocket:
         self.log = log
         self._stop = threading.Event()
         self._sock = None
+        self._subscribed = False
 
     def start(self):
         threading.Thread(target=self._run, name="protect-events", daemon=True).start()
@@ -251,11 +252,23 @@ class EventsSocket:
     def _run(self):
         backoff = 1
         while not self._stop.is_set():
+            self._subscribed = False
             try:
                 self._connect_and_read()
                 backoff = 1
             except Exception as e:
                 if not self._stop.is_set():
+                    # 🔴 The console closes this socket every ten minutes, so
+                    # _connect_and_read never returns normally and until
+                    # 0.12.2 the backoff was never reset: it climbed to 30 s
+                    # and stayed there, leaving 30 s in every 10 min in which a
+                    # doorbell press rang no panel (110 Roosevelt: 611 such
+                    # closes in two weeks). A close AFTER a good subscribe is
+                    # the console's habit, not a fault - reconnect at once.
+                    if self._subscribed:
+                        backoff = 1
+                        self.log(f"protect events: {e!r}; reconnecting")
+                        continue
                     self.log(f"protect events: {e!r}; retrying in {backoff}s")
                     self._stop.wait(backoff)
                     backoff = min(backoff * 2, 30)
@@ -282,6 +295,7 @@ class EventsSocket:
         if accept.lower() not in head.lower():
             raise ProtectError("events socket gave a bad accept key")
         self.log("protect events: subscribed")
+        self._subscribed = True
         # Block on reads rather than timing out every few seconds and reconnecting -
         # a reconnect window is a window a press can fall through. A dead peer is
         # caught by TCP keepalive (set above), which errors the recv and reconnects.
