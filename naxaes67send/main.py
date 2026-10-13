@@ -2,6 +2,7 @@
 around the network for the amplifiers it should be speaking to."""
 import os
 import threading
+import time
 
 import api
 import clips
@@ -17,6 +18,10 @@ except Exception as e:
 
 pipe = sender.build()
 threading.Thread(target=api.serve, daemon=True).start()
+# Finish any restore the last run never got to, then point every receive slot
+# at the stream - in the background, so neither the stream nor the API waits,
+# and so the first page after a restart pays for neither (0.15.0).
+threading.Thread(target=api.startup, daemon=True, name="startup").start()
 # The Fish key, from our Hub - at every start, so an install or an update is
 # all a house needs. Off the main thread: a slow Hub must not delay the stream.
 threading.Thread(
@@ -31,6 +36,17 @@ if (os.environ.get("AUTODETECT") or "true").lower() in ("1", "true", "yes", "on"
         target=discover.loop, daemon=True,
         args=(lambda: sender.local_ip(sender.MCAST), os.environ.get("AMP_USER") or "admin",
               os.environ.get("AMP_PASSWORD") or "", api.amplifiers),
-        kwargs={"log": api.log, "subnet": (os.environ.get("SUBNET") or "").strip() or None},
+        kwargs={"log": api.log, "subnet": (os.environ.get("SUBNET") or "").strip() or None,
+                # Every pass, and so every six hours: warm the receive slots,
+                # including on any amplifier this pass just added.
+                "after": lambda r: api.prewarm(
+                    "found " + ", ".join(r["added"]) if r.get("added") else "six-hourly")},
     ).start()
+else:
+    # No discovery to hang it on: warm the slots every six hours anyway.
+    def _rewarm():
+        while True:
+            time.sleep(discover.EVERY)
+            api.prewarm("six-hourly")
+    threading.Thread(target=_rewarm, daemon=True, name="rewarm").start()
 sender.run_forever(pipe)

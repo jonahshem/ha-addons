@@ -46,6 +46,9 @@ POST /announce?zones=Zone4[,Zone5]   audio in the body -> speak, then restore
      &clip=ID                        ... or a stored clip
      &before=ID|none  &after=ID|none  a sound around it (else the clip's / the house's setting)
 POST /scan            find the amplifiers on this network and add the new ones
+POST /live?zones=auto streamed PCM in the body -> a page, played as it arrives
+POST /repair          put back what the page journal says is still ours, then
+                      clear any zone left on the announcement input
 ```
 
 `/announce` is synchronous — the caller wants to know whether a page was
@@ -213,3 +216,104 @@ of the ones checked by hand said `403` to `admin` and let `chdevice` in.
 A zone is put back in a `finally`. A room left on a silent AES67 input is a
 room whose music never comes back, and that is a worse failure than the
 announcement not playing at all.
+
+If the amplifier's websocket is closed, or a write raises, the session is
+thrown away, a fresh login and socket are made and the restore is tried again
+- four times, with a growing pause - before anything is logged as `COULD NOT
+RESTORE`. What a page changed is also written to `/data/page-journal.json`
+as it happens and crossed off as it is put back, so a restore that a crash or
+a silent amplifier interrupted is finished at the next start, or by `POST
+/repair`. That only undoes what is provably still ours: a route goes back
+only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
+if the zone is still at the level the page wrote. A room somebody has touched
+since is theirs.
+
+## 0.15.0 — every amplifier at once, and a restore that is never skipped
+
+**What happened.** 69 Phillips, 2026-10-13, the house's first page: seven
+DM-NAX (`192.168.1.18`, `.160`–`.165`), 46 zones, a 3.2 s *Page All* relayed by
+RavaBridge to `POST /live?zones=auto`. The sender did one amplifier at a time,
+and on the first one pointed one never-used receive slot at a time - a REST
+read, a write and a 1.5 s settle per zone, 2.5 s each:
+
+```
+15:44:07 [nax] 192.168.1.18: [Zone1..Zone8] -> [Zone1,2,3,4,6,7,8] (bussed)
+15:44:09 Zone1: receive slot pointed at 'HA Announce 1'; volume 300 -> 700
+15:44:11 Zone2: receive slot pointed ...; volume 500 -> 700
+   ... Zone3, Zone4, Zone6 ...
+15:44:20 [nax] 192.168.1.18: COULD NOT RESTORE (socket is already closed.)
+15:44:20 COULD NOT RESTORE VOLUME for Zone1,2,3,4,6
+15:44:20 [api] live page failed: WebSocketConnectionClosedException: socket is already closed.
+```
+
+No audio anywhere, five rooms left at 700, the other six amplifiers never
+reached. Four changes:
+
+1. **Amplifiers in parallel.** `naxctl.announce_many` prepares and routes each
+   amplifier in its own thread (zones within one still go one at a time - the
+   device's rule). The page starts when every amplifier has landed, or `cap`
+   seconds after the first did: 3 s for `/live`, 10 s for `/announce`. An
+   amplifier that lands later joins late - its rooms hear the rest of the page
+   - and is restored like the others. A live page still trails the panels by
+   the routing time; nothing is dropped. The restore is per amplifier and
+   parallel too.
+2. **Receive slots warmed in the background.** `naxctl.prewarm` points every
+   zone's slot at our stream at start-up, after every discovery pass (and so
+   every six hours, and whenever discovery adds an amplifier), amplifiers in
+   parallel, one log line each. It never routes, never writes a volume, never
+   turns a zone on, leaves a slot carrying another session alone, and waits
+   while a page is in progress. A page's slot check is then free; when it is
+   not, the slots are read once per amplifier rather than once per zone.
+3. **The restore is never skipped** (above), and the socket is checked before
+   anything audible: one that died while slots were being pointed is replaced
+   before the first volume or route write, not discovered by it.
+4. **Why the socket closed.** Not known - it needs the amplifier.
+   `socket is already closed.` is websocket-client saying it had already read
+   EOF: the amplifier, or the network between, closed the TCP connection
+   about twelve seconds into a run of receive-slot writes (one every 2.5 s,
+   each followed by a 1.5 s settle - not a burst). An earlier draft of this
+   entry blamed the pool's `drop` closing a page's session; that could not
+   have happened in 0.14.2, where `drop` only ran after `get` had already
+   failed. What 0.15.0 changes is how the add-on lives with it: the
+   websocket listener (which was `except: pass` around `recv()` and spun flat
+   out on a dead socket, telling nobody) now stops, `alive()` goes false
+   within 0.6 s, and the log says when the socket closed, how long after it
+   opened, and the amplifier's close code if it sent one. The page
+   reconnects before it writes, and the slot writes are moved out of the page
+   altogether by the warm-up. If the next page logs `websocket closed N s
+   after it opened (the amplifier sent close …)`, that line names the cause;
+   if it keeps happening, a websocket keepalive or slower slot writes are the
+   next things to try - neither is guessed at here.
+
+Also: `ensure_rx` refuses a zone when the slots cannot be read, rather than
+reading the failure as "every slot is empty" (which would have taken over a
+slot belonging to somebody else); a fresh session's routes are seeded from a
+REST read so a clear is never confirmed by silence (this also fixes `/repair`'s
+`unstick`); and log lines from parallel threads no longer run together.
+
+**Nothing is crossed off on a read that failed or a write nobody
+acknowledged** (second review, before release). `Nax.zones()` turns a failed
+REST read into an empty answer, which is right for the tile and wrong for
+anything that acts on it; it now takes `strict`, and every caller that decides
+something reads strictly: the page's first read (an empty listing would have
+recorded `""` as what every room played and cleared its music afterwards),
+`recover` (it read every stuck zone as "moved on" and wiped the journal with
+nothing put back), and the route seeding after a reconnect (a failed read
+seeded nothing, and a clear was again confirmed by silence - a session that
+cannot be seeded is not used). `rx_streams(strict=True)` also refuses a reply
+without `NaxRxStreams`. A volume restore is read back from the amplifier
+before it counts - a send into a half-closed socket succeeds locally - and
+`recover` does the same; a room turned by somebody since is left. A zone whose
+volume cannot be read is never raised (nothing could put it back, and it may
+already be louder). Playback starts when every amplifier's routes have landed,
+not when each thread has finished its settle watch and volume read-back,
+which saves 1.5-2 s; `/live` now waits out the audio that piled up during
+routing before it returns, instead of a fixed 3 s tail that let the restore
+cut off the end of the page. Each amplifier's restore waits for its own
+preparation only, so one that does not answer no longer holds every other
+room on the silent input. A journal entry the house has since changed (another
+source, another level) is replaced by what the room has now. A warm-up asked
+for while one runs is run again afterwards rather than dropped - it may be for
+an amplifier discovery has just added. And `Nax.close()` no longer sleeps
+0.8 s when the listener has already stopped.
+

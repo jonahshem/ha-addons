@@ -90,7 +90,7 @@ predate the second panel. Backups: `/user/Backups/intercom-2026-09-09-before-rem
 
 ## Open items
 - Prove `zones=auto` on a real page (above). Then decide the default groups and the real per-zone levels (70 is the spec default).
-- First page after a sender restart pays ~2 s more (the amplifier session is cold); warm it at startup like the CRPC one.
+- ~~First page after a sender restart pays ~2 s more (the amplifier session is cold)~~ — 0.15.0 warms the sessions and receive slots at start-up (`naxctl.prewarm`).
 - The 7 NAX streaming presets were lost in the MP2 experiment (list in memory / `nax_mp1_snapshot_*.json`); re-save in the app.
 - Master Bed panel 52340 is Offline and "Touch Screen Remote" 52769 is Unknown on the processor — not page targets today.
 - Crestron support question (optional): does Crestron Home OS support a DM-NAX-8ZSA in Media Player 2 mode?

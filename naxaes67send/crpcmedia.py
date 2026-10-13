@@ -136,7 +136,7 @@ class CrestronHome:
                         try:
                             g = self._call("IRpcIntercom.GetPageableRoomGroups",
                                            {"intercomRevStamp": self._groups_rev})
-                            if g:
+                            if self._groups_changed(g):
                                 self._groups, self._groups_rev = g, g.get("IntercomRevStamp") or 0
                         except Exception:
                             pass
@@ -264,6 +264,20 @@ class CrestronHome:
             # last one around briefly - the audio arrives a moment after the
             # processor says the call started, and can outlive its end.
             self.active_page = dict(self.active_page, state="None", ended=time.time())
+
+    def _groups_changed(self, g):
+        """Whether a GetPageableRoomGroups answer replaces what we hold.
+
+        Unlike the media reads (null when nothing changed), "nothing changed
+        since revstamp N" comes back as {"IntercomRevStamp": N,
+        "PageableRoomGroups": []} - measured at 69 Phillips, 2026-10-13. Taking
+        that as the list emptied the settings page's page groups a minute after
+        start-up and sent every "auto" page to every zone. Replaced only on
+        the first answer or a new revstamp (which may really be no groups).
+        """
+        if not isinstance(g, dict):
+            return False
+        return self._groups is None or (g.get("IntercomRevStamp") or 0) != self._groups_rev
 
     def page_groups(self):
         """[{id, name, type, rooms: [names]}] as the installer defined them."""

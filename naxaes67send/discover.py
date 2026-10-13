@@ -283,15 +283,27 @@ def run(base, user, password, known, log=None, subnet=None):
     return report
 
 
-def loop(base_fn, user, password, known_fn, log=None, subnet=None, every=EVERY, first_delay=15):
+def loop(base_fn, user, password, known_fn, log=None, subnet=None, every=EVERY, first_delay=15,
+         after=None):
     """At start, then every six hours. `base_fn`/`known_fn` are called each time,
-    because the address and the configured amplifiers can both change."""
+    because the address and the configured amplifiers can both change.
+
+    `after(report)` runs after every pass, found something or not - the add-on
+    warms every amplifier's receive slots there (see naxctl.prewarm), so one
+    added by this pass is ready before anybody pages it, and a slot somebody
+    changed in six hours is put right off the critical path."""
     time.sleep(first_delay)
     while True:
+        report = None
         try:
-            run(base_fn(), user, password, known_fn(), log=log, subnet=subnet)
+            report = run(base_fn(), user, password, known_fn(), log=log, subnet=subnet)
         except Exception as e:
             _log(log, f"scan failed: {e!r}")
+        if after is not None:
+            try:
+                after(report or {})
+            except Exception as e:
+                _log(log, f"after-scan step failed: {e!r}")
         time.sleep(every)
 
 

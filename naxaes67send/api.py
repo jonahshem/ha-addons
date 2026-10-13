@@ -9,7 +9,8 @@ same flat LAN as everything else.
     GET  /zones           every zone on every amplifier, named and with status
     POST /discover        {host, user, password} -> that amplifier's zones
     POST /announce        audio in the body, zones in the query -> speak
-    POST /repair          put back any zone left on the announcement input
+    POST /repair          put back what the page journal says is still ours,
+                          then any zone left on the announcement input
     GET  /voices          the voices the clip editor offers, and whether Fish is set up
     GET  /cliptext?id=    what a clip says (typed, or transcribed once and kept)
     POST /tts?text=&voice=&speed=      speak without saving - the editor's Play
@@ -75,6 +76,22 @@ WAIT_FOR_TURN = 10.0
 # list. See naxctl.Pool: this is what removes the login and websocket handshake
 # from the front of every announcement.
 _pool = naxctl.Pool(log=lambda m: log(m))
+
+# What a page changed and has not put back yet, kept on disk so a restart (or
+# /repair) can finish a restore that a crash or a silent amplifier interrupted.
+# See naxctl.Journal and naxctl.recover.
+_journal = naxctl.Journal(os.environ.get("JOURNAL_FILE", "/data/page-journal.json"))
+
+# How long a page waits for the slowest amplifier once one has landed, before
+# it starts without it (naxctl.announce_many `cap`). Amplifiers are prepared in
+# parallel since 0.15.0; these only matter when one of them is slow.
+#
+# A live page streams while it is still being spoken, so it starts promptly and
+# a late amplifier's rooms hear the rest of it. A stored clip waits longer: it
+# is a few seconds long, and a room that misses its first three seconds has
+# missed most of it.
+LIVE_CAP = 3.0
+ANNOUNCE_CAP = 10.0
 
 MAX_AUDIO = 8 * 1024 * 1024        # about two minutes of anything sane
 MAX_HOLD = 120                     # a page is not a broadcast
@@ -226,11 +243,111 @@ CRPC_PIN = (os.environ.get("CRPC_PIN") or "2129918115").strip()
 _home = crpcmedia.CrestronHome(CRPC_HOST, CRPC_PIN, log=lambda m: log(m)) if CRPC_HOST else None
 
 
+_log_lock = threading.Lock()
+
+
 def log(msg):
     # Timestamped since 0.14.1: Home Assistant's add-on log shows none of its
     # own, and "the client did not hear the doorbell at 11:18" could not be
     # matched to a line. The Supervisor passes the house's TZ.
-    print(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg), flush=True)
+    #
+    # Under a lock since 0.15.0: one thread per amplifier logs at once now, and
+    # two lines run together are two lines nobody can read.
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg)
+    with _log_lock:
+        print(line, flush=True)
+
+
+def drain_live(audio, play, tail, clock=time.time, sleep=time.sleep):
+    """Feed a live page's queued audio to the stream and return when it has
+    been HEARD, not when it was handed over.
+
+    `play` (sender.play) only queues, and returns the chunk's length. Audio
+    that arrived while the zones were being routed is all handed over the
+    moment this starts, so "the queue ran dry, wait a tail" returned while
+    seconds of the page were still waiting to play - and the restore then
+    switched rooms back under the end of it. This keeps a running account of
+    when the queued audio will finish and waits that out, then the tail for
+    the buffers in flight.
+    """
+    ends = clock()
+    while True:
+        chunk = audio.get()
+        if chunk is None:
+            break
+        ends = max(ends, clock()) + play(chunk)
+    sleep(max(0.0, ends - clock()) + tail)
+
+
+_warming = threading.Lock()
+# Asked for while a warm-up was running. Not dropped: the request may exist
+# because an amplifier was just added, and the running pass took its list
+# of amplifiers before it was.
+_warm_again = threading.Event()
+
+
+def prewarm(reason):
+    """Point every amplifier's receive slots at our stream, in the background.
+
+    See naxctl.prewarm: it never routes, never touches a volume, leaves a slot
+    carrying another session alone, and waits out any page in progress. One at
+    a time; a request while one runs is remembered and run once more when it
+    finishes (a pass over slots already ours is one REST read per amplifier).
+    Returns whether it started now.
+    """
+    # Flag first, then try: whichever way the race with a finishing pass goes,
+    # either this call or that pass sees the flag and runs it.
+    _warm_again.set()
+    if not _warming.acquire(blocking=False):
+        return False
+    _warm_again.clear()
+
+    def run(reason):
+        while True:
+            try:
+                amps = {h: c for h, c in amplifiers().items() if c.get("password")}
+                if amps:
+                    log(f"[nax] warming receive slots on {len(amps)} amplifier(s) ({reason})")
+                    naxctl.prewarm(amps, _pool, SESSION, MCAST, RTP_PORT,
+                                   busy=_speaking.locked, log=log)
+            except Exception as e:
+                log(f"[nax] warming receive slots failed: {type(e).__name__}: {e}")
+            finally:
+                _warming.release()
+            if not _warm_again.is_set() or not _warming.acquire(blocking=False):
+                return
+            _warm_again.clear()
+            reason = "asked for again while the last pass ran"
+
+    threading.Thread(target=run, args=(reason,), name="prewarm", daemon=True).start()
+    return True
+
+
+def recover_journal(wait=WAIT_FOR_TURN):
+    """Put back whatever an earlier page recorded and never restored. Under
+    the page lock, so it can never run beside a page. Returns what it did, or
+    None if a page held the lock throughout."""
+    if not _journal.entries():
+        return {}
+    if not _speaking.acquire(timeout=wait):
+        return None
+    try:
+        amps = amplifiers()
+        log(f"[nax] the page journal has {len(_journal.entries())} zone(s) not yet put back - "
+            f"restoring what is still ours")
+        return naxctl.recover(amps, _journal, log=log, pool=_pool)
+    finally:
+        _speaking.release()
+
+
+def startup():
+    """After the API is up: finish any restore the last run left, then warm
+    the slots - so the first page after a restart pays nothing for either."""
+    try:
+        recover_journal(wait=60)
+    except Exception as e:
+        log(f"[nax] journal restore at start-up failed: {type(e).__name__}: {e}")
+    prewarm("start-up")
 
 
 def amplifiers():
@@ -590,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._fail(f"could not work out this box's address: {e}")
         report = discover.run(base, user, password, amplifiers(), log=log, subnet=subnet)
+        if report.get("added"):
+            prewarm("found " + ", ".join(report["added"]))
         return self._json(dict(report, ok=not report.get("error")))
 
     def _discover(self):
@@ -641,9 +760,13 @@ class Handler(BaseHTTPRequestHandler):
         if not _speaking.acquire(timeout=WAIT_FOR_TURN):
             return self._fail("An announcement is playing")
         try:
+            # First what the journal remembers: the zones' own sources and
+            # volumes, put back where they are provably still ours. Then the
+            # old sweep for anything on our input with no record, cleared.
+            journal = naxctl.recover(amps, _journal, log=log, pool=_pool) if _journal.entries() else {}
             found = naxctl.stray(amps, log=log)
             if not found:
-                return self._json({"ok": True, "stray": [], "cleared": {}})
+                return self._json({"ok": True, "stray": [], "cleared": {}, "journal": journal})
             cleared = naxctl.unstick(amps, found, log=log)
         except Exception as e:
             return self._fail(f"{type(e).__name__}: {e}")
@@ -653,6 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "stray": [f"{h}:{z}" for h, zs in found.items() for z in zs],
             "cleared": cleared,
+            "journal": journal,
         })
 
     def _announce(self):
@@ -842,7 +966,8 @@ class Handler(BaseHTTPRequestHandler):
                 naxctl.announce_many(amps, targets, play, log=log,
                                      session_name=SESSION, address=MCAST,
                                      floor=floors(), ready=info.update,
-                                     pool=_pool, port=RTP_PORT, home=_home)
+                                     pool=_pool, port=RTP_PORT, home=_home,
+                                     cap=ANNOUNCE_CAP, journal=_journal)
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] announcement failed: {broke['err']}")
@@ -936,20 +1061,16 @@ class Handler(BaseHTTPRequestHandler):
         started = time.time()
 
         def play():
-            while True:
-                chunk = audio.get()
-                if chunk is None:
-                    break
-                sender.play(chunk)
-            # The last buffers are still in flight when the queue runs dry.
-            time.sleep(TAIL_SECONDS)
+            drain_live(audio, sender.play, TAIL_SECONDS)
 
         def run():
             try:
-                naxctl.announce_many(amps, targets, play, log=log,
-                                     session_name=SESSION, address=MCAST,
-                                     floor=floors(), ready=info.update,
-                                     pool=_pool, port=RTP_PORT, home=_home)
+                # The final word, not just the snapshot `ready` took: rooms
+                # on an amplifier that joined late are in this one.
+                info.update(naxctl.announce_many(
+                    amps, targets, play, log=log, session_name=SESSION, address=MCAST,
+                    floor=floors(), ready=info.update, pool=_pool, port=RTP_PORT,
+                    home=_home, cap=LIVE_CAP, journal=_journal))
             except Exception as e:
                 broke["err"] = f"{type(e).__name__}: {e}"
                 log(f"[api] live page failed: {broke['err']}")
