@@ -99,3 +99,68 @@ def rehome(roomonly, zones):
             v = zones.get(ref) or {}
             still.append(v.get("room") or ref)
     return found, still
+
+
+WHOLE_HOUSE = "whole house"
+
+
+def is_whole_house(page_group):
+    """True for the processor's Whole House page group. PageableRoomGroupType is an enum:
+    the processor's own Intercom.json backups store it as an integer (0 WholeHouse, 1 a
+    custom group), and crpcmedia passes it through as it arrives, so both forms count."""
+    t = (page_group or {}).get("type")
+    if isinstance(t, bool):
+        return False
+    if isinstance(t, int):
+        return t == 0
+    return str(t or "").strip().lower() == "wholehouse"
+
+
+def speaker_groups(groups, zones, page_groups=None):
+    """The settings page's speaker groups, as `/zones` hands them to the
+    NaxAnnounce driver's Speakers list (0.15.2).
+
+    `groups` is `settings()["speaker_groups"]`, `zones` the composed list
+    `/zones` is serving, `page_groups` the processor's (`[{name, type}]`, or
+    None without one). Configured order, except that the group tied to Whole
+    House - by the page group's `WholeHouse` type, or by either name - leads,
+    because that is the first thing Crestron's own Page screen offers and
+    the driver selects the first entry when it starts.
+
+    A group is `available` when at least one of its zones is in the live list
+    with speakers. Its zones are written as the settings page saved them
+    (`host:Zone6`), which can be a bus partner the list folds into its
+    primary, or a bare `Zone4` in a single-amplifier house - both count.
+    """
+    live = set()
+    hosts = set()
+    for zid, v in (zones or {}).items():
+        v = v or {}
+        if v.get("unavailable") or str(zid).startswith("room:"):
+            continue
+        host = v.get("host") or str(zid).rpartition(":")[0]
+        hosts.add(host)
+        live.add(str(zid))
+        for m in v.get("members") or []:
+            live.add(f"{host}:{m}")
+    single = next(iter(hosts)) if len(hosts) == 1 else None
+
+    def is_live(ref):
+        ref = str(ref or "").strip()
+        if ":" not in ref and single is not None:
+            ref = f"{single}:{ref}"
+        return ref in live
+
+    whole = {norm(p.get("name")) for p in (page_groups or []) if is_whole_house(p)}
+    whole.discard("")
+    whole.add(WHOLE_HOUSE)
+    out = []
+    for g in groups or []:
+        out.append({"name": g["name"], "page_group": g.get("page_group") or "",
+                    "zones": list(g.get("zones") or []),
+                    "available": any(is_live(z) for z in g.get("zones") or [])})
+    lead = next((i for i, g in enumerate(out)
+                 if norm(g["page_group"]) in whole or norm(g["name"]) in whole), None)
+    if lead:
+        out.insert(0, out.pop(lead))
+    return out

@@ -41,7 +41,8 @@ Through ingress, so anything calling it already holds a token for this house.
 
 ```
 GET  /health          is the stream up, is anything playing
-GET  /zones           every zone, its source, whether audio is present
+GET  /zones           every zone, its source, whether audio is present,
+                      and the speaker groups (Whole House first)
 POST /announce?zones=Zone4[,Zone5]   audio in the body -> speak, then restore
      &clip=ID                        ... or a stored clip
      &before=ID|none  &after=ID|none  a sound around it (else the clip's / the house's setting)
@@ -227,6 +228,42 @@ a silent amplifier interrupted is finished at the next start, or by `POST
 only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
 if the zone is still at the level the page wrote. A room somebody has touched
 since is theirs.
+
+## 0.15.2 — the speaker groups in `/zones`, for the driver's page
+
+The NaxAnnounce driver's page was a box per room - 43 of them at 110
+Roosevelt - where Crestron's own Page screen offers *Whole House*, *1st
+Floor* and so on. The speaker groups on the settings page are that list
+already, so `/zones` now carries them as `groups`:
+
+```
+"groups": [{"name": "Whole House", "page_group": "Whole House",
+            "zones": ["192.168.1.51:Zone1", ...], "available": true}, ...]
+```
+
+In the configured order, except that the group tied to Whole House leads -
+by its page group's `WholeHouse` type when the processor answers (the string
+`WholeHouse` or the enum's `0`, the form the processor's own Intercom.json
+keeps), else by either name - because the driver's default is the first entry.
+The driver does no leading of its own, so this is the one place it is decided. A
+group none of whose zones is in the live list with speakers is still listed,
+`available: false`, so a dead amplifier shows rather than hides a choice.
+Zones count as live as the settings page saved them: a bus partner (`Zone6`
+folded into `Zone5`) and a bare `Zone4` in a one-amplifier house both do.
+Paging a group is `zones=group:NAME`, which `resolve_zones` has taken since
+speaker groups existed, with two changes now that a driver sends it from a list
+and from saved rules:
+
+- **An unknown group is refused**, in words, instead of paging every zone. A
+  typo or a group renamed after a rule was saved used to page the whole house;
+  it is now a failed page the driver shows as a Problem. `zones=auto` keeps its
+  every-zone fallback - it names no group.
+- **Names compare the way room names do** (`zonelist.norm`: case, curly quotes,
+  runs of spaces), and a group's name is trimmed when it is read and saved, so
+  `1st Floor ` saved with a stray space is the `1st Floor` the driver lists.
+
+NaxAnnounce 1.6.0 is the driver that reads this; an older driver ignores the
+key. `tests/test_speaker_groups.py`.
 
 ## 0.15.0 — every amplifier at once, and a restore that is never skipped
 

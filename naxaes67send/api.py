@@ -6,7 +6,8 @@ sounds: this endpoint can put a voice into every room, and the Pi is on the
 same flat LAN as everything else.
 
     GET  /health          is the stream up, how many amplifiers are configured
-    GET  /zones           every zone on every amplifier, named and with status
+    GET  /zones           every zone on every amplifier, named and with status,
+                          and the speaker groups (Whole House first)
     POST /discover        {host, user, password} -> that amplifier's zones
     POST /announce        audio in the body, zones in the query -> speak
     POST /repair          put back what the page journal says is still ours,
@@ -175,8 +176,12 @@ def settings():
     groups = []
     for g in o.get("speaker_groups") or []:
         zones = [str(z) for z in (g.get("zones") or []) if z]
-        if g.get("name") and zones:
-            groups.append({"name": str(g["name"]), "zones": zones, "page_group": str(g.get("page_group") or "")})
+        # Trimmed (0.15.2): the driver trims what /zones lists and sends that back as
+        # group:NAME, so "1st Floor " saved with a stray space never matched and paged
+        # every zone.
+        name = str(g.get("name") or "").strip()
+        if name and zones:
+            groups.append({"name": name, "zones": zones, "page_group": str(g.get("page_group") or "").strip()})
     return {"default_percent": percent, "zone_volumes": vols, "speaker_groups": groups,
             # What plays before/after every announcement unless the clip or
             # the request says otherwise: "" or a clip id (one of the sounds).
@@ -199,7 +204,8 @@ def resolve_zones(spec, amps, home):
 
     "auto"         the speaker group tied to the page group somebody is paging
                    right now (or named like it); else every zone.
-    "group:NAME"   that speaker group.
+    "group:NAME"   that speaker group, or None (refused, `why` says why) when there
+                   is none by that name.
     anything else  the comma-separated list it always was.
     """
     st = settings()
@@ -221,12 +227,18 @@ def resolve_zones(spec, amps, home):
         if chosen is None:
             why = f"page group {names or 'unknown'}: no speaker group tied to it, using every zone"
     elif spec.lower().startswith("group:"):
+        # Compared as zonelist compares room names, so a curly apostrophe or a doubled
+        # space typed on a phone is the same group.
         name = spec[6:].strip()
-        g = next((g for g in st["speaker_groups"] if g["name"].lower() == name.lower()), None)
+        g = next((g for g in st["speaker_groups"] if zonelist.norm(g["name"]) == zonelist.norm(name)), None)
         if g:
             chosen, why = g["zones"], f"speaker group {g['name']!r}"
         else:
-            why = f"no speaker group named {name!r}, using every zone"
+            # Refused, not every zone (0.15.2): a group is asked for by name from a
+            # rule or the driver's Speakers list, and a typo or a renamed group paging
+            # the whole house is the wrong way to fail. "auto" keeps its fallback - it
+            # names no group, and every zone is what a page with no group tied to it means.
+            return None, f"no speaker group named {name!r}"
     else:
         return [z.strip() for z in spec.split(",") if z.strip()], ""
     if chosen is None:
@@ -574,7 +586,21 @@ class Handler(BaseHTTPRequestHandler):
             if not amps:
                 return self._fail("No amplifier configured")
             zones, trouble, rooms = house_zones(amps)
-            return self._json({"ok": True, "zones": zones, "trouble": trouble,
+            # The speaker groups too (0.15.2), so the driver's page can offer
+            # "Whole House" as one choice the way Crestron's own Page screen
+            # does, instead of a box per room. The page groups only decide
+            # which group leads; crpcmedia caches them, and a processor that
+            # does not answer just leaves the configured order - asked only
+            # when it has just given its rooms, so a dead one costs one wait
+            # per poll, not two.
+            pgroups = None
+            if _home is not None and rooms is not None:
+                try:
+                    pgroups = _home.page_groups()
+                except Exception as e:
+                    log(f"[api] zones: processor did not give its page groups ({e})")
+            groups = zonelist.speaker_groups(settings()["speaker_groups"], zones, pgroups)
+            return self._json({"ok": True, "zones": zones, "trouble": trouble, "groups": groups,
                                "rooms": len(rooms) if rooms is not None else None})
 
         if tail == "/clips":
@@ -652,9 +678,9 @@ class Handler(BaseHTTPRequestHandler):
             options["zone_volumes"] = [{"zone": str(v.get("zone")), "percent": int(v.get("percent"))}
                                        for v in want["zone_volumes"] if v.get("zone") is not None]
         if "speaker_groups" in want:
-            options["speaker_groups"] = [{"name": str(g.get("name")), "zones": [str(z) for z in g.get("zones") or []],
-                                          "page_group": str(g.get("page_group") or "")}
-                                         for g in want["speaker_groups"] if g.get("name")]
+            options["speaker_groups"] = [{"name": str(g.get("name")).strip(), "zones": [str(z) for z in g.get("zones") or []],
+                                          "page_group": str(g.get("page_group") or "").strip()}
+                                         for g in want["speaker_groups"] if str(g.get("name") or "").strip()]
         if "default_percent" in want:
             options["default_percent"] = int(want["default_percent"])
         for key in ("chime_before", "chime_after", "fish_api_key", "fish_voice"):
@@ -789,6 +815,8 @@ class Handler(BaseHTTPRequestHandler):
         refs, why = resolve_zones(q.get("zones", [""])[0], amps, _home)
         if why:
             log(f"[api] zones: {why}")
+        if refs is None:
+            return self._fail(why)
         # A room listed for completeness ("no speakers found") cannot be
         # paged; asked for alongside real zones it is dropped, alone it is
         # refused in words.
@@ -1029,6 +1057,8 @@ class Handler(BaseHTTPRequestHandler):
         refs, why = resolve_zones(q.get("zones", [""])[0], amps, _home)
         if why:
             log(f"[api] zones: {why}")
+        if refs is None:
+            return self._fail(why)
         for ref in refs:
             if not ref.strip():
                 continue
