@@ -24,7 +24,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .cloudflare import Cloudflare, CloudflareError
+from .cloudflare import Cloudflare, CloudflareError, full_hostname
 from .const import (
     ADDON_CHOICES,
     ADDON_NAX_SENDER,
@@ -144,7 +144,7 @@ class BavHouseFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._data.update({
                     CONF_SITE_NAME: name,
                     CONF_SITE_SLUG: slug,
-                    CONF_HOSTNAME: hostname or f"{slug}.{zone}",
+                    CONF_HOSTNAME: full_hostname(hostname or slug, zone),
                     CONF_DEVICE_PIN: user_input[CONF_DEVICE_PIN],
                 })
                 return await self.async_step_crestron()

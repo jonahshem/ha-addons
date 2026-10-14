@@ -23,7 +23,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from . import proxy
-from .cloudflare import HA_SERVICE as CF_HA_SERVICE, Cloudflare, CloudflareError
+from .cloudflare import HA_SERVICE as CF_HA_SERVICE, Cloudflare, CloudflareError, full_hostname
 from .const import (
     ADDON_CLOUDFLARED,
     ADDON_NAX_PROBE,
@@ -176,6 +176,9 @@ async def run(hass: HomeAssistant, entry: ConfigEntry, progress: Progress,
     `manual` is a person running the action: it may retry what an automatic
     run will not, such as a trust Home Assistant reverted."""
     cfg = {**entry.data, **entry.options}
+    if cfg.get(CONF_HOSTNAME):
+        # A house saved with a bare label before 1.2.1 is repaired here, every run.
+        cfg[CONF_HOSTNAME] = full_hostname(cfg[CONF_HOSTNAME], cfg.get(CONF_CF_ZONE) or "bav.homes")
     done: list[str] = list(entry.options.get(STATE_STEPS) or [])
     session = async_get_clientsession(hass)
     sup = Supervisor(session)

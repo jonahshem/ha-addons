@@ -185,13 +185,15 @@ class Cloudflare:
         house at a rebuilt tunnel is a normal thing to have to do.
         """
         zid = await self.zone_id(zone)
+        # Cloudflare stores names lowercase; ask for and write them that way.
+        hostname = (hostname or "").strip().lower()
         content = f"{tunnel_id}.cfargotunnel.com"
         record = {"type": "CNAME", "name": hostname, "content": content,
                   "proxied": True, "ttl": 1}
         payload = await self._call(
             "GET", f"/zones/{zid}/dns_records?name={_q(hostname)}")
         for existing in payload.get("result") or []:
-            if existing.get("name") != hostname:
+            if (existing.get("name") or "").lower() != hostname:
                 continue
             if (existing.get("type") == "CNAME"
                     and existing.get("content") == content
@@ -202,6 +204,24 @@ class Cloudflare:
             return "updated"
         await self._call("POST", f"/zones/{zid}/dns_records", record)
         return "created"
+
+
+def full_hostname(hostname: str, zone: str) -> str:
+    """`hostname` as the fully qualified name Cloudflare stores, lowercase.
+
+    🔴 A bare label typed on the form (`1950e4`) used to be kept as typed. Cloudflare's
+    POST appends the zone to it, so the first run CREATED `1950e4.bav.homes` - but the
+    tunnel was routed for `1950e4`, which nothing requests (every page a 404), and every
+    later run looked the record up as `1950e4`, found nothing, POSTed again and failed
+    `81053 record already exists` (1950 East 4th, 2026-10-14).
+    """
+    name = (hostname or "").strip().strip(".").lower()
+    zone = (zone or "").strip().strip(".").lower()
+    if not name or not zone:
+        return name
+    if name == zone or name.endswith("." + zone) or "." in name:
+        return name
+    return f"{name}.{zone}"
 
 
 def _why(payload: dict) -> str:
