@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-14T20:17:46Z",
+  "generated": "2026-10-14T21:41:16Z",
   "base": "https://raw.githubusercontent.com/jonahshem/ha-addons/main/custom_components",
   "integrations": {
     "crestron_home": {
@@ -28,7 +28,7 @@
       ]
     },
     "bav_house": {
-      "version": "1.2.1",
+      "version": "1.2.2",
       "files": [
         "README.md",
         "__init__.py",

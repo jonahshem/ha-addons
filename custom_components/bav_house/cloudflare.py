@@ -158,7 +158,16 @@ class Cloudflare:
                 continue
             if rule.get("hostname") != hostname:
                 kept.append(rule)
-        ours = {"hostname": hostname, "service": service, "originRequest": {}}
+        origin: dict = {}
+        if service.startswith("https://"):
+            # 🔴 A house whose Home Assistant serves its own TLS (a DuckDNS /
+            # Let's Encrypt certificate in `http:`) answers on https, with a
+            # certificate for its public name - never for `homeassistant`. A
+            # verifying cloudflared refuses that and the tunnel serves 502
+            # (macmiz max, 2026-10-14). The hop is the Supervisor's own network
+            # inside the box, so the name check buys nothing there.
+            origin["noTLSVerify"] = True
+        ours = {"hostname": hostname, "service": service, "originRequest": origin}
         rules = [*kept, ours, catch_all]
         await self._call(
             "PUT", f"/accounts/{self._account}/cfd_tunnel/{tunnel_id}/configurations",

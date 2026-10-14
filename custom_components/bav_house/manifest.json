@@ -1,7 +1,7 @@
 {
   "domain": "bav_house",
   "name": "BAV House Setup",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "documentation": "https://github.com/jonahshem/ha-addons",
   "issue_tracker": "https://github.com/jonahshem/ha-addons/issues",
   "dependencies": [],
