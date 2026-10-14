@@ -688,6 +688,7 @@ class ProtectDoors:
         # because finding out during a call means a call with no talkback at all.
         self.has_limiter = False
         self.cameras = []
+        self._live_ids = None         # camera ids Protect has; None until it is asked
         for c in pc.get("cameras") or []:
             if isinstance(c, dict):
                 self.cameras.append(self._entry(c))
@@ -734,10 +735,54 @@ class ProtectDoors:
         }
 
     def _known(self, camera_id, name):
+        """The entry for this camera, if there is one.
+
+        🔴 By id whenever there is an id. Two Protect cameras can share a name -
+        at 1151 East 7th a G5 turret and the side door's G3 reader are both
+        "Side Door" - and matching by name made the second one "known" as the
+        first, so it was never listed. A name only matches an entry nobody has
+        tied to a camera yet: one typed in by hand, waiting to learn its id."""
+        name = str(name or "").lower()
+        if camera_id:
+            for e in self.cameras:
+                if e["camera_id"] == camera_id:
+                    return e
+            for e in self.cameras:
+                if self._unbound(e) and name and (
+                        e["camera_name"].lower() == name or e["name"].lower() == name):
+                    return e
+            return None
         for e in self.cameras:
-            if (camera_id and e["camera_id"] == camera_id) or e["name"].lower() == str(name or "").lower():
+            if e["name"].lower() == name:
                 return e
         return None
+
+    def _unbound(self, e):
+        """No camera of its own: typed in by hand with no id yet, or holding an
+        id Protect no longer has - a doorbell replaced under warranty, or
+        re-adopted, comes back with a new id and the same name, and must keep
+        the settings it had (review 2026-10-14)."""
+        return not e["camera_id"] or (self._live_ids is not None
+                                      and e["camera_id"] not in self._live_ids)
+
+    def _rebind(self, e, camera_id):
+        if e["camera_id"] and e["camera_id"] != camera_id:
+            self.log(f"protect: '{e['name']}' is now camera {camera_id} "
+                     f"(was {e['camera_id']}, which Protect no longer has)")
+            e["prev_camera_id"] = e["camera_id"]
+        e["camera_id"] = str(camera_id)
+
+    def _unique_name(self, name, ctype):
+        """`name`, or `name (model)` / `name 2` if an entry already has it - the
+        name is also the door account, and two doors cannot share one."""
+        taken = {e["name"].lower() for e in self.cameras} | {e["user"] for e in self.cameras}
+        if name.lower() not in taken and slugify(name) not in taken:
+            return name
+        candidates = ([f"{name} ({ctype})"] if ctype else []) + [f"{name} {i}" for i in range(2, 100)]
+        for c in candidates:
+            if c.lower() not in taken and slugify(c) not in taken:
+                return c
+        return f"{name} {len(self.cameras) + 1}"
 
     @staticmethod
     def _is_doorbell(cam):
@@ -888,11 +933,18 @@ class ProtectDoors:
             self.log("protect: this ffmpeg has no alimiter - talkback gain will boost without a limiter")
 
     def _autodetect(self, cams):
+        self._live_ids = {c.get("id") for c in cams if c.get("id")}
         for cam in cams:
-            if self._known(cam.get("id"), cam.get("name")):
+            known = self._known(cam.get("id"), cam.get("name"))
+            if known is not None:
+                # An entry found by name claims this camera now, so a second
+                # camera of the same name is not absorbed into it too.
+                if cam.get("id") and known["camera_id"] != cam.get("id"):
+                    self._rebind(known, cam.get("id"))
                 continue
             bell = self._is_doorbell(cam)
-            e = self._entry({"name": cam.get("name") or "Camera", "camera_id": cam.get("id"),
+            name = self._unique_name(str(cam.get("name") or "Camera"), str(cam.get("type") or ""))
+            e = self._entry({"name": name, "camera_id": cam.get("id"),
                              "camera_name": cam.get("name") or ""}, call=bell)
             e["triggers"] = ["ring"] if bell else []
             self.cameras.append(e)
@@ -901,9 +953,22 @@ class ProtectDoors:
 
     def _finalize(self, cams, details):
         by_id = {c.get("id"): c for c in cams}
-        by_name = {str(c.get("name", "")).lower(): c for c in cams}
+        self._live_ids = set(by_id) - {None}
+        # By name only for an entry with no camera of its own, and only among
+        # cameras no other entry has claimed by id - two cameras can share a name.
+        claimed = {e["camera_id"] for e in self.cameras if e["camera_id"] in by_id}
+        by_name = {}
+        for c in cams:
+            if c.get("id") not in claimed:
+                by_name.setdefault(str(c.get("name", "")).lower(), c)
         for e in self.cameras:
-            cam = by_id.get(e["camera_id"]) or by_name.get(e["camera_name"].lower()) or by_name.get(e["name"].lower())
+            cam = by_id.get(e["camera_id"]) if e["camera_id"] else None
+            if cam is None:
+                cam = by_name.get(e["camera_name"].lower()) or by_name.get(e["name"].lower())
+                if cam is not None:
+                    claimed.add(cam.get("id"))
+                    by_name = {k: v for k, v in by_name.items() if v is not cam}
+                    self._rebind(e, cam.get("id"))
             if cam:
                 e["camera_id"] = cam.get("id")
                 e["camera_name"] = e["camera_name"] or str(cam.get("name") or "")
@@ -951,11 +1016,17 @@ class ProtectDoors:
         by_key = {}
         for c in existing:
             if isinstance(c, dict):
-                by_key[str(c.get("camera_id") or "")] = c
-                by_key["n:" + str(c.get("name") or "").lower()] = c
+                if c.get("camera_id"):
+                    by_key[str(c["camera_id"])] = c
+                else:
+                    # Only a row with no id is found by name: a row that names
+                    # one camera must never be taken for another of that name.
+                    by_key["n:" + str(c.get("name") or "").lower()] = c
         changed = False
         for e in self.cameras:
-            row = by_key.get(e["camera_id"]) or by_key.get("n:" + e["name"].lower())
+            row = (by_key.get(e["camera_id"]) if e["camera_id"] else None) \
+                or (by_key.get(e["prev_camera_id"]) if e.get("prev_camera_id") else None) \
+                or by_key.get("n:" + e["name"].lower())
             if row is None:
                 row = {"name": e["name"], "camera_id": e["camera_id"], "camera_name": e["camera_name"],
                        "call": bool(e["call"]), "triggers": list(e["triggers"]), "ring": list(e["ring"]),
@@ -974,8 +1045,8 @@ class ProtectDoors:
                 if row.get(k) != e[k]:
                     row[k] = e[k]
                     changed = True
-            if not row.get("camera_id") and e["camera_id"]:
-                row["camera_id"] = e["camera_id"]
+            if e["camera_id"] and row.get("camera_id") != e["camera_id"]:
+                row["camera_id"] = e["camera_id"]     # learned, or the camera was replaced
                 changed = True
         pc["cameras"] = existing
         if pc.get("doorbells"):
@@ -1071,12 +1142,22 @@ class ProtectDoors:
 
     def ring_now(self, name_or_user):
         """Manual trigger (API /protectring), for any camera, call switched on or not."""
+        e = self._lookup(name_or_user)
+        if e is None:
+            return False
+        self._ring(e, e.get("camera_id"))
+        return True
+
+    def _lookup(self, name_or_user):
+        """The camera a page or API call names: by account first, then by our
+        name, and only then by Protect's own name - which two cameras can share."""
         key = slugify(name_or_user)
-        for e in self.cameras:
-            if e["user"] == key or slugify(e["name"]) == key or slugify(e["camera_name"] or "") == key:
-                self._ring(e, e.get("camera_id"))
-                return True
-        return False
+        for field in (lambda e: e["user"], lambda e: slugify(e["name"]),
+                      lambda e: slugify(e["camera_name"] or "")):
+            for e in self.cameras:
+                if field(e) == key:
+                    return e
+        return None
 
     def save_settings(self, rows):
         """Apply edits from the page: live at once, and saved to the options.
@@ -1128,10 +1209,7 @@ class ProtectDoors:
         Proves the picture and the voice really flow, and at what rate, with no
         SIP call in it: nothing rings. The safe way to check a camera.
         """
-        key = slugify(name_or_user)
-        entry = next((e for e in self.cameras
-                      if e["user"] == key or slugify(e["name"]) == key
-                      or slugify(e["camera_name"] or "") == key), None)
+        entry = self._lookup(name_or_user)
         if entry is None:
             return {"error": f"no Protect camera called {name_or_user!r}"}
         if not self.client:

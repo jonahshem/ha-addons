@@ -79,8 +79,18 @@ CONF_NAX_PASSWORD = "nax_password"
 STATE_STEPS = "steps_done"
 STATE_LAST_ERROR = "last_error"
 STATE_TUNNEL_ID = "tunnel_id"
+# When commissioning last restarted Home Assistant to apply the reverse-proxy
+# trust. A second restart for the same thing within PROXY_RESTART_GUARD is a
+# loop, not progress, so it is refused and reported instead.
+STATE_PROXY_RESTART = "proxy_restart_at"
+PROXY_RESTART_GUARD = 15 * 60
+# The `created_at` of the pending HTTP config commissioning staged: how its own
+# trial is told apart from one somebody else started.
+STATE_PROXY_STAGED = "proxy_staged"
 
+STEP_PROXY = "proxy"
 STEP_CLOUDFLARE = "cloudflare"
 STEP_REPOS = "repositories"
 STEP_ADDONS = "addons"
 STEP_CRESTRON = "crestron"
+STEP_PUBLIC = "public"

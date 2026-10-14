@@ -161,6 +161,31 @@ def add_http_trust(target_root):
     return True
 
 
+# From this Core on, HTTP settings live in Settings > System > Network and a
+# configuration.yaml `http:` added after the first boot is ignored (Home
+# Assistant only raises a repair saying so). bav_house sets the trust there.
+HTTP_IN_UI_FROM = (2026, 8)
+
+
+def http_is_yaml(core_version):
+    """Does this Core still read `http:` from configuration.yaml? Unknown is
+    treated as yes: the YAML is harmless where it is ignored, and needed where
+    it is not."""
+    try:
+        major, minor = (int(part) for part in str(core_version).split(".")[:2])
+    except ValueError:
+        return True
+    return (major, minor) < HTTP_IN_UI_FROM
+
+
+def core_version():
+    try:
+        return ((supervisor("GET", "/core/info") or {}).get("data") or {}).get("version")
+    except Exception as e:  # noqa: BLE001 - unknown is a legible outcome
+        log(f"could not ask the Supervisor which Home Assistant this is: {e}")
+        return None
+
+
 def add_boot_hook(target_root):
     """Add `bav_house:` to configuration.yaml so it loads on every boot.
 
@@ -235,7 +260,13 @@ def run(opts):
                 log(f"{domain}: not published yet, skipped")
         if opts.get("start_on_boot", True):
             add_boot_hook(root)
-        add_http_trust(root)
+        version = core_version()
+        if http_is_yaml(version):
+            add_http_trust(root)
+        else:
+            log(f"Home Assistant {version} keeps its HTTP settings in Settings > "
+                f"System > Network, not configuration.yaml - commissioning "
+                f"(bav_house) sets the trusted proxy there")
         STATE["done"] = True
         if opts.get("restart_after", True):
             log("restarting Home Assistant - a custom integration is only "

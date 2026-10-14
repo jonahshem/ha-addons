@@ -89,7 +89,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if progress.running:
             _LOGGER.warning("bav_house: commissioning is already running")
             return
-        await provision.run(hass, entry, progress)
+        # In the background, like the run at start: it can take minutes and may
+        # restart Home Assistant, and a caller that gives up - a script
+        # reloaded, a re-triggered automation - must not cancel it half-way.
+        # Marked running now, so a second press does not start a second run.
+        progress.running = True
+        entry.async_create_background_task(
+            hass, provision.run(hass, entry, progress, manual=True),
+            "bav_house provision (manual)")
 
     hass.services.async_register(DOMAIN, SERVICE_PROVISION, _provision)
     return True

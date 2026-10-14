@@ -30,6 +30,13 @@ SUPERVISOR_URLS = ("http://supervisor", "http://172.30.32.2")
 # build.
 INSTALL_TIMEOUT = 30 * 60
 DEFAULT_TIMEOUT = 60
+# Connecting is separate from answering: an address that cannot even be
+# connected to was never sent anything, so trying the other one is safe.
+CONNECT_TIMEOUT = 15
+_NEVER_CONNECTED = tuple(
+    cls for cls in (aiohttp.ClientConnectorError,
+                    getattr(aiohttp, "ConnectionTimeoutError", None))
+    if cls is not None)
 
 
 class SupervisorError(Exception):
@@ -73,7 +80,8 @@ class Supervisor:
                 async with self._session.request(
                     method, base + path, json=body,
                     headers={"Authorization": f"Bearer {self._token}"},
-                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    timeout=aiohttp.ClientTimeout(total=timeout,
+                                                  connect=CONNECT_TIMEOUT),
                 ) as resp:
                     payload = await _read_json(resp)
                     if resp.status >= 400:
@@ -86,8 +94,24 @@ class Supervisor:
                         )
                     self._base = base
                     return payload
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            except _NEVER_CONNECTED as err:
+                # Nothing was sent, so the other address may be tried.
                 last = err
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                if method == "GET":
+                    last = err
+                    continue
+                # 🔴 Both addresses are the same Supervisor. A POST that was sent
+                # and then timed out may be running there now - a store reload
+                # or an install queued behind an add-on build - so sending it
+                # again either doubles the wait or starts it twice. And it is
+                # one slow step, not an unreachable Supervisor: the run goes on.
+                if isinstance(err, asyncio.TimeoutError):
+                    raise SupervisorError(
+                        f"{method} {path}: no answer within {timeout} s - the "
+                        f"Supervisor may still be working on it (an add-on build "
+                        f"holds it for minutes on a Pi)") from None
+                raise SupervisorError(f"{method} {path}: {err!r}") from None
         raise SupervisorUnavailable(f"could not reach the Supervisor: {last!r}")
 
     # -- store -----------------------------------------------------------

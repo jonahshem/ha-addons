@@ -16,6 +16,7 @@ import logging
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -90,6 +91,17 @@ class BavIntegrationUpdate(UpdateEntity):
             payload.installed_version, self._hass.config.config_dir, self._domain)
 
     async def async_install(self, version, backup, **kwargs) -> None:
+        # 🔴 Installing restarts Home Assistant, and a restart kills a running
+        # commissioning in the middle of whatever the Supervisor is doing for it
+        # - at 1151 East 7th two updates installed a minute apart left an add-on
+        # building with nobody to start it, and the run after them failed.
+        progress = (self._hass.data.get(DOMAIN, {})
+                    .get(self._entry.entry_id, {}).get("progress"))
+        if progress is not None and progress.running:
+            raise HomeAssistantError(
+                "Commissioning is running. Install this update when it has "
+                "finished - installing restarts Home Assistant, which would "
+                "cut commissioning short.")
         manifest = self._coordinator.data or {}
         if not manifest:
             manifest = await payload.fetch_manifest(

@@ -8,8 +8,33 @@ Domain `bav_house`. Lives at `/config/custom_components/bav_house`.
 
 ## What it does, in order
 
+0. **The reverse-proxy trust** (when cloudflared is wanted). Home Assistant
+   refuses a proxied request unless its HTTP settings trust the proxy, so
+   without this a healthy tunnel serves a bare `400: Bad Request` on every path
+   (1151 East 7th, 2026-10-14). 🔴 From Core 2026.8 those settings live in a
+   store behind Settings > System > Network, not in `configuration.yaml` - an
+   `http:` block added after the first boot is ignored. So `proxy.py` does what
+   that settings page does: stages `use_x_forwarded_for` + `172.30.32.0/23` as
+   the *pending* config, copying everything else (the port above all) from the
+   confirmed one, and restarts. Home Assistant starts on it as a five-minute
+   trial; commissioning runs again on that start, sees its own trial running
+   and **confirms it**, then carries on. 🔴 Only its *own* trial: the pending
+   config's `created_at` is recorded on the entry when it is staged, and
+   nothing else is ever confirmed - a person's port or SSL change that happens
+   to keep the trust stays theirs, with Home Assistant's five-minute revert
+   still armed. Somebody else's staged change is left alone; their failed one
+   (an old seeded `http:` block Home Assistant migrated onto 8123 and reverted
+   is the usual one) is replaced. Its own reverted trial is retried only when a
+   person runs the action, and it never restarts twice for this within 15
+   minutes unasked. It runs Home Assistant's configuration check before asking
+   for the restart, and if Home Assistant is still up three minutes after
+   asking, it says so and carries on. First in the run because the restart is
+   harmless before add-ons are being built and costly during. A house that
+   trusts only the docs' `172.30.33.0/24` gets `/23` added - one extra restart.
 1. **The tunnel.** Creates a Cloudflare Tunnel with the name you give it, routes
-   it at Home Assistant, and points `<site>.bav.homes` at it. Returns the
+   it at Home Assistant (`http://homeassistant:<the port HA bound>` - never the
+   IP HA reports for itself, which at 1151 East 7th was HAOS's `docker0` bridge
+   and left the tunnel first 400ing, then timing out), and points `<site>.bav.homes` at it. Returns the
    connector token.
 2. **The repositories.** Adds `jonahshem/ha-addons` and
    `homeassistant-apps/app-cloudflared` to the add-on store, then reloads it -
@@ -19,6 +44,16 @@ Domain `bav_house`. Lives at `/config/custom_components/bav_house`.
    into its options, set it to start on boot, start it.
 4. **Crestron Home.** Creates the `crestron_home` config entry against the
    processor, using the address and token already checked on the form.
+5. **From the outside.** Fetches `https://<hostname>/manifest.json` the way a
+   person will. Home Assistant's own refusal (`400: Bad Request`, plain text)
+   fails the run with the setting to change; a tunnel still connecting or a
+   brand-new DNS record is only noted, and a Cloudflare Access login in front
+   counts as working.
+
+A slow or refused add-on store reload costs only itself: the add-ons already in
+the store still install, and one that is missing says so by name. A Supervisor
+call that times out is never re-sent to the Supervisor's second address - it is
+the same Supervisor, and the POST may be running there already.
 
 Every step records itself on the config entry, and **nothing is done twice**:
 adding a repository that is there, installing an add-on that is installed, or
@@ -81,7 +116,9 @@ integration and its files. The integration compares that to the `version` in the
 `manifest.json` on disk and offers the difference in **Settings → Updates**, for
 `crestron_home` and for itself. Installing writes the new files and restarts
 Home Assistant, because a custom integration is imported at start and there is
-no other way to swap it.
+no other way to swap it. 🔴 Installing is refused while commissioning is
+running: the restart would cut the run short in the middle of whatever the
+Supervisor is building for it (1151 East 7th, 2026-10-14).
 
 One source for everything: the same repository the add-ons come from.
 
