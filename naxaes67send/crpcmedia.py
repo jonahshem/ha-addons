@@ -90,11 +90,13 @@ class CrestronHome:
         self._id = 1000
         self._last_hb = 0.0
         self._lock = threading.Lock()
-        # The live view of what is playing, kept by the warm thread. A page
-        # reads this instantly; asking the processor at page time put its two
-        # replies (200 KB together, about a second warm) in front of the audio.
+        # The media rooms and their names, kept by the warm thread (a minute
+        # old at most). What is PLAYING is read at page time, not polled: until
+        # 0.15.2 the warm thread asked for it every two seconds, ~40,000 calls
+        # a day, while 110 Roosevelt's Crestron program (SSP) grew ~125 MB a
+        # day - 0.15.3 removes the poll to find out whether the two are one
+        # thing. The page hides the read behind the amplifier setup (naxctl).
         self._sub, self._sub_rev, self._sub_at = None, 0, 0.0      # rooms + names
-        self._state, self._state_rev, self._state_at = None, 0, 0.0  # room/source states
         # Intercom: the page groups the installer defined (names, member
         # rooms) and the page that is happening right now, from the processor's
         # own events - so a relayed page can be sent to the speakers that
@@ -110,14 +112,14 @@ class CrestronHome:
         threading.Thread(target=self._keep_warm, daemon=True, name="crpc-warm").start()
 
     def _keep_warm(self):
-        """Hold the session, and keep the media snapshot current.
+        """Hold the session, and keep the room lists current.
 
-        Both reads take a revstamp and answer null when nothing has changed
-        since it - measured at 0.5 s for the null, against 0.6 s for a full
-        121 KB state - so polling the state every two seconds costs the
-        processor almost nothing, and the snapshot is never more than a couple
-        of seconds behind the house. The room list changes when an installer
-        does something, so it is refreshed every minute.
+        The reads take a revstamp and answer null when nothing has changed
+        since it (0.5 s for the null, 0.6 s for a full 121 KB state). Rooms,
+        names and page groups change when an installer does something, so
+        they are refreshed every minute or five. The playing state is NOT
+        polled here any more (see __init__); the intercom events still arrive
+        through _pump, which is what a relayed page is matched against.
         """
         while True:
             try:
@@ -154,11 +156,6 @@ class CrestronHome:
                         if sub:
                             self._sub, self._sub_rev = sub, sub.get("SystemRevstamp") or 0
                         self._sub_at = now
-                    if now - self._state_at > 2:
-                        st = self._call("IRpcMedia.GetSubsystemState", {"stateRevstamp": self._state_rev})
-                        if st:
-                            self._state, self._state_rev = st, st.get("StateRevstamp") or 0
-                        self._state_at = now
                     self._pump(0.2)          # sends the heartbeat when it is due
             except Exception as e:
                 self.close()
@@ -348,13 +345,13 @@ class CrestronHome:
         installer called "Deck" on the amplifier is the media room called
         "Deck" in Crestron Home, because both came off the same room list.
         """
-        # The snapshot, if the warm thread has one that is recent; otherwise a
-        # live read - the first page after a restart, or a processor that has
-        # been unreachable.
-        sub, st = self._sub, self._state
-        if not sub or not st or time.time() - self._state_at > 15:
+        # The room list from the warm snapshot when there is one; the playing
+        # state is always a live read (one call, ~0.6 s warm) - it has to
+        # describe the house at this moment, and it is no longer polled.
+        sub = self._sub
+        if not sub:
             sub = self.call("IRpcMedia.GetSubsystem", {"systemRevstamp": 0})
-            st = self.call("IRpcMedia.GetSubsystemState", {"stateRevstamp": 0})
+        st = self.call("IRpcMedia.GetSubsystemState", {"stateRevstamp": 0})
         names = {r["Id"]: (r.get("Name") or "").strip() for r in sub.get("Rooms", [])}
         playing = {s["Id"] for s in st.get("SourceStates", [])
                    if "Playing" in (s.get("PlayerState") or [])}
