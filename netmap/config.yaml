@@ -1,0 +1,46 @@
+name: BAV NetMap
+version: "1.0.0"
+slug: netmap
+description: Maps the house network on a schedule and watches the devices that matter (offline alerts, new devices)
+# Pis in the rack, plus amd64 so it can be tried on a VM first.
+arch: [aarch64, amd64]
+init: false
+# The LAN itself: ARP table, multicast discovery (mDNS/SSDP) and ping all need the host's
+# network, not the add-on bridge.
+host_network: true
+privileged: [NET_RAW]
+# Sensors, events and notifications go to Core through the Supervisor.
+homeassistant_api: true
+# The plan lives in /share/netmap/plan so it can be edited over Samba and read by the laptop.
+map: [share:rw]
+boot: auto
+startup: services
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:lan
+panel_title: NetMap
+options:
+  site: house
+  # Blank = this box's own network. Add more (cameras VLAN, a routed subnet) as CIDRs.
+  subnets: []
+  scan_interval_hours: 6
+  monitor_interval_seconds: 60
+  down_after_checks: 3
+  # Notify once a device has been down this long; shorter outages are counted as "blips".
+  notify_after_seconds: 180
+  notify_new_devices: true
+  # Addresses checked every 5 s instead (e.g. boards that reset themselves).
+  fast_watch: []
+  gentle: false
+schema:
+  site: str
+  subnets: [str]
+  scan_interval_hours: int(1,168)
+  monitor_interval_seconds: int(15,3600)
+  down_after_checks: int(1,20)
+  notify_after_seconds: int(0,86400)
+  # e.g. mobile_app_jonahs_pixel; blank = a notification in Home Assistant itself
+  notify_service: str?
+  notify_new_devices: bool
+  fast_watch: [str]
+  gentle: bool

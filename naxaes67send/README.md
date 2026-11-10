@@ -229,6 +229,19 @@ only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
 if the zone is still at the level the page wrote. A room somebody has touched
 since is theirs.
 
+## 0.15.4 — starts even with Protection mode off
+
+A house whose add-on had Protection mode switched off crash-looped at start,
+before any of our code ran, logging only `s6-overlay-suexec: fatal: can only
+run as pid 1`. The config asked for `host_pid`, which the Supervisor applies
+only to an unprotected add-on; in the host's PID namespace s6-overlay's
+`/init` is not pid 1 and refuses to start. With Protection mode on (the
+default) the setting was silently ignored, which is why every other house
+worked. Nothing in the add-on uses the host's processes - PTP is GStreamer's
+own userspace client - so `host_pid` is gone, and the add-on now starts the
+same way whichever way Protection mode is set. The probe add-on (0.2.1) had
+the same line and lost it too.
+
 ## 0.15.2 — the speaker groups in `/zones`, for the driver's page
 
 The NaxAnnounce driver's page was a box per room - 43 of them at 110
