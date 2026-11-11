@@ -229,6 +229,27 @@ only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
 if the zone is still at the level the page wrote. A room somebody has touched
 since is theirs.
 
+## 0.15.6 — a zone playing Crestron's room-to-room music is left alone
+
+110 Roosevelt, 2026-11-11, the first doorbell after 0.15.5 went live with music
+on: Crestron Home was playing the Kitchen amplifier's player in Common Areas,
+which it does through **the same receive slot and `Aes67` input** this add-on
+uses (`.51 Stream06`: `SessionNameRequested` empty, `SessionNameStatus`
+`MediaStream37c4.42.68.88.bb.fa`). The page trusted its memory that the slot
+was ours, read `Aes67` as its own leftover, raised the zone to 700 - the music
+got loud, the chime never reached that room - and afterwards set it to nothing.
+
+- A slot's owner is read from `SessionNameRequested` **and**
+  `SessionNameStatus`; another name in either, while the slot is running, means
+  the zone is refused untouched (no route, no volume). A Stopped slot's leftover
+  name does not lock the zone out.
+- A page reads each amplifier's slots fresh (one REST read) instead of trusting
+  what the last warm-up confirmed.
+
+Ducking the music under the chime instead of switching the zone - which the
+DM-NAX supports natively (`ZoneOutputs/.../Announcing`, `DuckerConfig`,
+`DoorChimes`) - is the next step, not this release.
+
 ## 0.15.5 — the SDP follows the grandmaster; mis-addressed slots are corrected
 
 Both found at 110 Roosevelt on 2026-11-11, after "doorbells are not working".

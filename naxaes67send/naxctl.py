@@ -332,6 +332,8 @@ class Nax:
             if isinstance(v, dict) and (v.get("SessionNameStatus") or "").strip() == session_name:
                 out.append({"clock": sdp_clock(v.get("TsRefClkValue")),
                             "source": v.get("SourceNetworkAddress"),
+                            "group": v.get("NetworkAddressStatus"),
+                            "port": v.get("PortStatus"),
                             "id": v.get("SessionId") or key})
         return out
 
@@ -363,13 +365,29 @@ class Nax:
         zone, paid in the middle of the house's first page.
         """
         slot = self.slot_of(zone)
-        # Already confirmed on this session. The slot does not wander while we
-        # hold the connection, and re-checking costs a REST round trip on every
-        # single page - or a whole SETTLE, if it decides to write again.
-        if (slot, session_name) in self._rx_ok:
+        # Already confirmed on this session - but only trusted when the caller
+        # did not hand us a fresh read. 🔴 The slot DOES wander: Crestron Home
+        # plays a source that lives on another amplifier through this same slot
+        # (110 Roosevelt, 2026-11-11: Common Areas music from .54's player came in
+        # on .51 Stream06), and a page that trusted the memory routed the zone to
+        # "our" input, which was carrying the music, and raised it to 700.
+        if streams is None and (slot, session_name) in self._rx_ok:
             return False
         cur = (streams if streams is not None else self.rx_streams(strict=True)).get(slot) or {}
-        mine = (cur.get("SessionNameRequested") or cur.get("SessionName") or "").strip()
+        self._rx_ok.discard((slot, session_name))
+        requested = (cur.get("SessionNameRequested") or cur.get("SessionName") or "").strip()
+        status = (cur.get("SessionNameStatus") or "").strip()
+        active = "stopped" not in (cur.get("StreamStatus") or "").lower()
+        # 🔴 Crestron's room-to-room stream leaves SessionNameRequested EMPTY and
+        # shows only in SessionNameStatus. Reading Requested alone, that slot looked
+        # free and would have been taken over. A name in Status counts while the slot
+        # is running; a Stopped slot's leftover name does not lock the zone out.
+        others = [n for n in (requested, status if active else "") if n and n != session_name]
+        mine = requested or (status if active else "")
+        if others:
+            raise SlotTaken(
+                f"{zone}'s receive slot is carrying {others[0]!r} (Crestron Home or another "
+                f"sender) - leaving the zone alone rather than taking it over")
         if mine == session_name:
             # The name alone is not "right". Stream06 at 14 Malke carried our
             # session name and port 4570 - a leftover from an early sender - and
@@ -384,15 +402,9 @@ class Nax:
             self.log(f"[nax] {self.host} {zone}: receive slot names our session "
                      f"but asks for {cur.get('NetworkAddressRequested')}:"
                      f"{cur.get('PortRequested')} - correcting to {address}:{port}")
-        elif mine:
-            # 🔴 Only a slot naming somebody ELSE's session is refused. Until
-            # 0.15.5 this was a plain `if mine:`, so the correction logged just
-            # above never ran: our own name made the slot look taken, it was
-            # counted "carrying another session", and it stayed wrong at every
-            # start-up. 110 Roosevelt's Gym sat on 0.0.0.0 that way.
-            raise SlotTaken(
-                f"{zone}'s receive slot is already carrying {mine!r} - "
-                f"leaving it alone rather than taking it over")
+        # (Until 0.15.5 a plain `if mine: raise SlotTaken` sat here, so the
+        # correction logged just above never ran for our own name: 110's Gym sat
+        # on 0.0.0.0 at every start-up. Somebody else's name is refused above.)
         self.subscribe(slot, session_name, address, port)
         time.sleep(SETTLE)
         # Read it back. An amplifier can keep the name and drop the address:
@@ -1134,7 +1146,10 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
                     continue
                 for attempt in (1, 2):
                     try:
-                        if streams is None and not nax.rx_known(zone, session_name):
+                        # Read fresh once per amplifier per page (0.15.5): Crestron
+                        # may have put room-to-room music on a slot since we last
+                        # looked. One REST read; the memory alone is not enough.
+                        if streams is None:
                             streams = nax.rx_streams(strict=True)
                         # A zone whose receive slot belongs to something else
                         # is refused rather than taken over - see `ensure_rx`.
@@ -1607,8 +1622,12 @@ def sdp_clock(ts_refclk):
 def stale_announcements(held, clock):
     """Judge one amplifier's copies of our session against what we announce.
 
-    `held` is `Nax.announced()`. Returns None when it holds exactly one copy
-    and that copy names `clock`; otherwise a sentence saying what is wrong.
+    `held` is `Nax.announced()`. Returns None when every copy names `clock`
+    and they all describe the same stream (group, port); otherwise a sentence
+    saying what is wrong. Two identical copies are not a fault: after a
+    switch from an add-on that could not withdraw its announcement (0.15.3 ->
+    0.15.5 at 110, 2026-11-11) every amplifier held both until the old one
+    timed out, and the pages played.
 
     🔴 Why this exists: at 110 Roosevelt (2026-11-11) the DM-NAX-4ZSA-50s kept
     an old copy naming a clock the house no longer used, and every zone on them
@@ -1617,12 +1636,17 @@ def stale_announcements(held, clock):
     """
     if not held:
         return "does not list our session at all (SAP not reaching it?)"
-    clocks = sorted({h["clock"] or "?" for h in held})
     want = (clock or "").upper()
-    if len(held) > 1:
+    wrong = [h for h in held if h["clock"] != want]
+    if wrong:
+        if len(held) == 1:
+            return f"holds a stale copy naming clock {held[0]['clock']} (announcing {want})"
+        clocks = sorted({h["clock"] or "?" for h in held})
         return f"holds {len(held)} copies of our session (clocks {', '.join(clocks)}; announcing {want})"
-    if held[0]["clock"] != want:
-        return f"holds a stale copy naming clock {held[0]['clock']} (announcing {want})"
+    streams = {(h.get("group"), str(h.get("port"))) for h in held}
+    if len(streams) > 1:
+        return (f"holds {len(held)} copies of our session describing different streams "
+                f"({', '.join(f'{g}:{p}' for g, p in sorted(streams, key=str))})")
     return None
 
 
