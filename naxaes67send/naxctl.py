@@ -323,6 +323,48 @@ class Nax:
             raise NaxError(f"{zone} is not a zone name") from e
         return f"Stream{n:02d}"
 
+    # -- the amplifier's own door chimes (0.15.7) ---------------------------
+    def chimes(self):
+        """The built-in chime slots: [{"slot", "name", "zones": [enabled zones]}].
+
+        🔴 Why these matter: a DM-NAX plays its own door chime OVER whatever the
+        zone is playing - the music ducks (`Announcing.DuckingLevel`) and comes
+        back on its own - with no route or volume touched. Proven at 110 Roosevelt
+        2026-11-11 (Kitchen, .54 DefaultSlot01, music on Input07). Our own clips
+        can only be played by switching the zone, so a doorbell may choose this
+        instead. Firmware 3.1.0103/0139 has the 26 factory slots and no custom ones.
+        """
+        dc = (self.get("DoorChimes").get("DoorChimes") or {}).get("DefaultChimes") or {}
+        out = []
+        for slot in sorted(dc):
+            v = dc[slot] or {}
+            out.append({"slot": slot, "name": v.get("Name") or slot,
+                        "zones": sorted((z for z, e in (v.get("PlaybackZones") or {}).items()
+                                         if (e or {}).get("IsEnabled")), key=_zone_order),
+                        "all": sorted((v.get("PlaybackZones") or {}).keys(), key=_zone_order)})
+        return out
+
+    def play_chime(self, slot, zones):
+        """Ring built-in chime `slot` in exactly `zones` of this amplifier.
+
+        The slot's PlaybackZones is a stored setting, so it is written only when
+        it differs from what is wanted, then `Play` is sent. Over the WebSocket,
+        like every other write here. Returns the zones it rang.
+        """
+        limit = self.zone_limit()
+        want = [z for z in zones if not (limit and _zone_number(z) > limit)]
+        cur = next((c for c in self.chimes() if c["slot"] == slot), None)
+        if cur is None:
+            raise NaxError(f"no built-in chime {slot!r} on this amplifier")
+        if not want:
+            return []
+        if sorted(cur["zones"], key=_zone_order) != sorted(want, key=_zone_order):
+            self._send({"Device": {"DoorChimes": {"DefaultChimes": {slot: {"PlaybackZones": {
+                z: {"IsEnabled": z in want} for z in (cur["all"] or want)}}}}}})
+            time.sleep(0.4)
+        self._send({"Device": {"DoorChimes": {"DefaultChimes": {slot: {"Play": True}}}}})
+        return want
+
     def announced(self, session_name):
         """What this amplifier holds for our session in its discovered-stream
         list (`NaxSdp`): [{"clock", "source", "id"}], one per copy it keeps."""

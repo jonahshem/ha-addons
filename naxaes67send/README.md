@@ -229,6 +229,33 @@ only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
 if the zone is still at the level the page wrote. A room somebody has touched
 since is theirs.
 
+## 0.15.7 — per doorbell: its own announcement, or the amplifier's chime over the music
+
+A DM-NAX plays its own built-in door chime **over** whatever a zone is
+playing: the music ducks (`ZoneOutputs/Zones/ZoneN/Announcing.DuckingLevel`,
+-20 dB here) and comes back by itself, and no route or volume changes. Proven
+by ear at 110 Roosevelt on 2026-11-11 (`DoorChimes/DefaultChimes/DefaultSlot01
+{"Play": true}` on .54, Kitchen, music on Input07). Our own clips can only be
+played by switching the zone, so each doorbell can now choose:
+
+- **Custom** (default): the clip, exactly as before.
+- **NAX chime**: one of the 26 factory chimes (Dual Tone, Westminster,
+  ringtones, alerts - firmware 3.1.0103/0139 has no custom slots), in the zones
+  ticked for it, or the zones the doorbell's programming names when none are.
+
+Set on the add-on's page under **Doorbells** (with a Test button), stored as
+the `doorbell_modes` option. `/announce?clip=<doorbell>` honours it, so Crestron
+programming does not change. `POST /chime {"chime": "DefaultSlot01", "zones":
+["host:ZoneN"]}` rings one now. The chime's level is each zone's
+`Announcing.Volume` on the amplifier, not this add-on's announce volume.
+Ringing writes the slot's `PlaybackZones` on an amplifier only when it differs
+from what is wanted, then `Play`; a DM-NAX-4Z's fifth zone is never rung.
+
+Also fixed: two saves from the page without a restart between them lost the
+first - `_save_config` built on `/data/options.json`, which the Supervisor
+rewrites only at start. Reading and saving now use the newer of that and
+`/data/settings.json`.
+
 ## 0.15.6 — a zone playing Crestron's room-to-room music is left alone
 
 110 Roosevelt, 2026-11-11, the first doorbell after 0.15.5 went live with music

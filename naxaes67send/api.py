@@ -151,18 +151,34 @@ SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "/data/settings.json")
 SETTINGS_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.html")
 
 
+def _current_options():
+    """The newest saved option set: settings.json after a save from the page,
+    options.json after a start (the Supervisor rewrites it then, and an edit in
+    Home Assistant's own options form arrives that way).
+
+    🔴 0.15.7: `_save_config` used to build on options.json alone, which is only
+    rewritten at START - so a second save from the page without a restart in
+    between started from the pre-first-save options and dropped the first save
+    (speaker groups saved, then doorbells saved = speaker groups gone, in the
+    Supervisor's copy too). Both files, newest wins."""
+    best, best_t = None, -1.0
+    for path in (SETTINGS_FILE, OPTIONS_FILE):
+        try:
+            t = os.path.getmtime(path)
+            with open(path) as f:
+                o = json.load(f)
+        except Exception:
+            continue
+        if t > best_t:
+            best, best_t = o, t
+    return best
+
+
 def settings():
     """Speaker groups and per-zone volumes, read fresh from the add-on's own
     options file each time - the settings page writes them through the
     Supervisor, and a page should honour a save made a second ago."""
-    o = {}
-    for path in (SETTINGS_FILE, OPTIONS_FILE):
-        try:
-            with open(path) as f:
-                o = json.load(f)
-            break
-        except Exception:
-            continue
+    o = _current_options() or {}
     percent = o.get("default_percent")
     try:
         percent = int(percent) if percent not in (None, "") else 70
@@ -183,7 +199,19 @@ def settings():
         name = str(g.get("name") or "").strip()
         if name and zones:
             groups.append({"name": name, "zones": zones, "page_group": str(g.get("page_group") or "").strip()})
+    # Per doorbell (0.15.7): a clip set to "nax" rings the amplifiers' own chime
+    # over the music instead of switching zones to the clip. "custom" (or no
+    # entry) is the clip, exactly as before.
+    doorbells = {}
+    for d in o.get("doorbell_modes") or []:
+        clip = str(d.get("clip") or "").strip()
+        if not clip:
+            continue
+        doorbells[clip] = {"mode": "nax" if str(d.get("mode") or "").strip().lower() == "nax" else "custom",
+                           "chime": str(d.get("chime") or "").strip(),
+                           "zones": [str(z) for z in (d.get("zones") or []) if z]}
     return {"default_percent": percent, "zone_volumes": vols, "speaker_groups": groups,
+            "doorbells": doorbells,
             # What plays before/after every announcement unless the clip or
             # the request says otherwise: "" or a clip id (one of the sounds).
             "chime_before": str(o.get("chime_before") or "").strip(),
@@ -467,6 +495,42 @@ def split_zone(ref):
     return host, zone
 
 
+def ring_nax_chime(slot, refs, amps):
+    """Ring an amplifier's own built-in chime `slot` in `refs` (host:ZoneN).
+
+    The chime plays OVER whatever each zone is playing - the amplifier ducks
+    the music itself - and no route or volume is touched (see Nax.chimes).
+    Amplifiers in parallel. Returns {"rang": [...], "failed": {host: why}}.
+    """
+    per = {}
+    for ref in refs:
+        host, zone = split_zone(ref)
+        if not host and len(amps) == 1:
+            host = next(iter(amps))
+        if host in amps and zone:
+            per.setdefault(host, []).append(zone)
+    rang, failed, lock = [], {}, threading.Lock()
+
+    def one(host, zones):
+        try:
+            got = _pool.get(host, amps[host]).play_chime(slot, zones)
+            with lock:
+                rang.extend(f"{host}:{z}" for z in got)
+        except Exception as e:
+            _pool.drop(host, force=True)
+            with lock:
+                failed[host] = f"{type(e).__name__}: {e}"
+
+    threads = [threading.Thread(target=one, args=(h, z), daemon=True) for h, z in per.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    log(f"[chime] {slot} rang in {', '.join(rang) or 'nothing'}"
+        + (f"; failed {failed}" if failed else ""))
+    return {"rang": rang, "failed": failed}
+
+
 def house_zones(amps):
     """The zone list `/zones` serves - every amplifier's zones shaped around
     Crestron Home's rooms - with {host: why} for amplifiers that did not
@@ -623,12 +687,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if tail == "/config":
             st = settings()
-            zones = {}
+            zones, chime_names = {}, {}
             for host, cfg in amps.items():
                 try:
                     nax = _pool.get(host, cfg)
                     for zone, info in nax.zones().items():
                         zones[f"{host}:{zone}"] = {"name": info.get("name"), "volume": info.get("volume")}
+                    if not chime_names:
+                        # The factory chime names are the same on every DM-NAX.
+                        chime_names = {c["slot"]: c["name"] for c in nax.chimes()}
                 except Exception as e:
                     log(f"[api] config: {host} not answering ({e})")
             groups = []
@@ -641,8 +708,10 @@ class Handler(BaseHTTPRequestHandler):
                 "default_percent": st["default_percent"],
                 "zone_volumes": [{"zone": z, "percent": p} for z, p in st["zone_volumes"].items()],
                 "speaker_groups": st["speaker_groups"],
+                "doorbell_modes": [dict(v, clip=k) for k, v in st["doorbells"].items()],
                 "chime_before": st["chime_before"], "chime_after": st["chime_after"]},
                 "zones": zones, "page_groups": groups,
+                "nax_chimes": [{"slot": s, "name": n} for s, n in sorted(chime_names.items())],
                 "active_page": (_home.active_page if _home is not None else None)})
         if tail == "/zones":
             if not amps:
@@ -703,6 +772,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._announce()
         if tail == "/config":
             return self._save_config()
+        if tail == "/chime":
+            return self._chime()
         if tail == "/live":
             return self._live()
         if tail == "/clips":
@@ -723,6 +794,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._fleet_key()
         return self._json({"error": "Not found"}, 404)
 
+    def _chime(self):
+        """POST /chime {"chime": "DefaultSlot01", "zones": ["host:ZoneN", ...]}:
+        ring a built-in chime now - the settings page's Test button."""
+        try:
+            want = json.loads(self._body(MAX_BODY) or b"{}")
+        except ValueError:
+            return self._json({"error": "Bad request"}, 400)
+        amps = amplifiers()
+        slot = str(want.get("chime") or "").strip()
+        zones = [str(z) for z in want.get("zones") or [] if z]
+        if not slot or not zones:
+            return self._fail("Choose a chime and at least one zone")
+        res = ring_nax_chime(slot, zones, amps)
+        if not res["rang"]:
+            return self._fail(f"Rang nowhere: {res['failed'] or 'no zones'}")
+        return self._json({"ok": True, "zones": res["rang"], "failed": res["failed"]})
+
     def _save_config(self):
         try:
             want = json.loads(self._body(MAX_BODY) or b"{}")
@@ -731,11 +819,10 @@ class Handler(BaseHTTPRequestHandler):
         token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
         if not token:
             return self._fail("No Supervisor token - the add-on needs hassio_api and a with-contenv run.sh")
-        try:
-            with open(OPTIONS_FILE) as f:
-                options = json.load(f)
-        except Exception as e:
-            return self._fail(f"Could not read the current options: {e}")
+        options = _current_options()
+        if options is None:
+            return self._fail("Could not read the current options")
+        options = dict(options)
         if "zone_volumes" in want:
             options["zone_volumes"] = [{"zone": str(v.get("zone")), "percent": int(v.get("percent"))}
                                        for v in want["zone_volumes"] if v.get("zone") is not None]
@@ -743,6 +830,13 @@ class Handler(BaseHTTPRequestHandler):
             options["speaker_groups"] = [{"name": str(g.get("name")).strip(), "zones": [str(z) for z in g.get("zones") or []],
                                           "page_group": str(g.get("page_group") or "").strip()}
                                          for g in want["speaker_groups"] if str(g.get("name") or "").strip()]
+        if "doorbell_modes" in want:
+            options["doorbell_modes"] = [
+                {"clip": str(d.get("clip")).strip(),
+                 "mode": "nax" if str(d.get("mode") or "").strip().lower() == "nax" else "custom",
+                 "chime": str(d.get("chime") or "").strip(),
+                 "zones": [str(z) for z in d.get("zones") or []]}
+                for d in want["doorbell_modes"] if str(d.get("clip") or "").strip()]
         if "default_percent" in want:
             options["default_percent"] = int(want["default_percent"])
         for key in ("chime_before", "chime_after", "fish_api_key", "fish_voice"):
@@ -926,6 +1020,20 @@ class Handler(BaseHTTPRequestHandler):
         # Either a stored clip by id, or audio in the body as before. The
         # driver uses the first; HomeUI's recorder still uses the second.
         clip_id = (q.get("clip", [""])[0] or "").strip()
+
+        # 0.15.7: a doorbell set to the amplifiers' own chime rings that instead,
+        # over the music, in the zones chosen for it (or the ones asked for).
+        bell = settings()["doorbells"].get(clip_id) if clip_id else None
+        if bell and bell["mode"] == "nax":
+            if not bell["chime"]:
+                return self._fail(f"'{clip_id}' is set to a NAX chime but no chime is chosen")
+            zones_for = bell["zones"] or [f"{h}:{z}" for h, zs in targets.items() for z in zs]
+            res = ring_nax_chime(bell["chime"], zones_for, amps)
+            if not res["rang"]:
+                return self._fail(f"NAX chime {bell['chime']} rang nowhere: {res['failed'] or 'no zones'}")
+            return self._json({"ok": True, "mode": "nax", "chime": bell["chime"],
+                               "zones": res["rang"], "failed": res["failed"]})
+
         if clip_id:
             stored = clips.path_for(clip_id)
             if not stored:

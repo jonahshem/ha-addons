@@ -40,6 +40,11 @@
     <div class="row"><label>or speak this text <input id="cliptext" type="text" placeholder="The pool gate is open" style="width:22rem"></label><button class="quiet" id="clipspeak">Make it</button></div>
     <div class="row"><label><input id="clipfacing" type="checkbox" checked> Show on the tile</label><span id="clipstatus" class="muted"></span></div>
   </div>
+  <h2>Doorbells</h2>
+  <p class="muted">Per doorbell: <b>Custom</b> plays its announcement as it always has (the zones switch to it). <b>NAX chime</b> rings the amplifier's own built-in chime instead, over whatever is playing - the music dips under it and comes back by itself, nothing is switched.</p>
+  <div id="doorbells"><span class="muted">reading...</span></div>
+  <div class="row"><button id="dbsave">Save doorbells</button><span id="dbstatus" class="muted"></span></div>
+
   <h2>Doorbell &amp; chime sounds</h2>
   <p class="muted">Sounds play before or after the words ("ding-dong, someone is at the front door"). Play one here to hear it on this device - nothing goes to the speakers.</p>
   <div class="card"><div class="sounds" id="sounds"><span class="muted">reading...</span></div></div>
@@ -140,6 +145,76 @@ document.getElementById("save").onclick = async () => {
     cfg.default_percent = cfg.default_percent || 70;
     renderVolumes(); renderGroups(); renderPageGroups();
   } catch (e) { status("Could not load settings: " + e.message, "bad"); }
+})();
+
+// -- doorbells: per doorbell, its own announcement or the amplifier's built-in chime --
+(function(){
+  const HH = TOKEN ? {"Authorization": "Bearer " + TOKEN} : {};
+  const esc = v => String(v ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const say = (m, bad) => { const e = document.getElementById("dbstatus"); e.textContent = " " + (m || ""); e.style.color = bad ? "var(--bad)" : ""; };
+  let modes = {}, chimes = [], dzones = {}, bells = [];
+  async function load() {
+    let c, cl;
+    try {
+      c = await (await fetch(base + "/config", {headers: HH, cache: "no-store"})).json();
+      cl = (await (await fetch(base + "/clips", {headers: HH, cache: "no-store"})).json()).clips || [];
+    } catch (e) { document.getElementById("doorbells").innerHTML = '<span class="muted">could not read the settings</span>'; return; }
+    dzones = c.zones || {}; chimes = c.nax_chimes || [];
+    modes = Object.fromEntries(((c.config || {}).doorbell_modes || []).map(d => [d.clip, d]));
+    // The door and gate lines: announcements kept off the tile, and anything already set up here.
+    bells = cl.filter(x => !x.sound && (!x.user_facing || modes[x.id]));
+    render();
+  }
+  function card(b) {
+    const m = modes[b.id] || {clip: b.id, mode: "custom", chime: "", zones: []};
+    const d = document.createElement("div"); d.className = "card"; d.dataset.clip = b.id;
+    const copts = chimes.map(x => `<option value="${esc(x.slot)}" ${m.chime === x.slot ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+    d.innerHTML = `<div class="row"><b>${esc(b.name)}</b> <code>${esc(b.id)}</code>
+        <label><input type="radio" name="m_${esc(b.id)}" value="custom" ${m.mode !== "nax" ? "checked" : ""}> Custom (its announcement)</label>
+        <label><input type="radio" name="m_${esc(b.id)}" value="nax" ${m.mode === "nax" ? "checked" : ""}> NAX chime</label></div>
+      <div class="nax" style="${m.mode === "nax" ? "" : "display:none"}">
+        <div class="row"><label>Chime <select class="dchime">${copts || '<option value="">(no amplifier answered)</option>'}</select></label>
+          <button class="quiet dtest">Test in the zones ticked</button><span class="muted dmsg"></span></div>
+        <div class="muted" style="font-size:.85rem">Zones it rings in. None ticked = the rooms the doorbell's Crestron programming names.</div>
+        <div class="zones">${Object.keys(dzones).sort().map(id => `<label><input type="checkbox" class="dzone" value="${esc(id)}" ${(m.zones || []).includes(id) ? "checked" : ""}> ${esc(dzones[id].name || id)}</label>`).join("")}</div>
+      </div>`;
+    d.querySelectorAll("input[type=radio]").forEach(r => r.onchange = () => {
+      d.querySelector(".nax").style.display = d.querySelector("input[type=radio]:checked").value === "nax" ? "" : "none"; });
+    d.querySelector(".dtest").onclick = async () => {
+      const msg = d.querySelector(".dmsg");
+      const z = Array.from(d.querySelectorAll(".dzone:checked")).map(i => i.value);
+      if (!z.length) { msg.textContent = " tick at least one zone to test"; return; }
+      msg.textContent = " ringing...";
+      try {
+        const r = await (await fetch(base + "/chime", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH),
+          body: JSON.stringify({chime: d.querySelector(".dchime").value, zones: z})})).json();
+        msg.textContent = r.ok ? " rang in " + r.zones.length + " zone(s)" + (Object.keys(r.failed || {}).length ? " - failed on " + Object.keys(r.failed).join(", ") : "") : " " + (r.error || "failed");
+      } catch (e) { msg.textContent = " failed: " + e; }
+    };
+    return d;
+  }
+  function render() {
+    const box = document.getElementById("doorbells"); box.innerHTML = "";
+    if (!bells.length) { box.innerHTML = '<span class="muted">No doorbell announcements. The door and gate lines are the clips kept off the tile.</span>'; return; }
+    bells.forEach(b => box.appendChild(card(b)));
+  }
+  document.getElementById("dbsave").onclick = async () => {
+    const list = Array.from(document.querySelectorAll("#doorbells .card")).map(c => ({
+      clip: c.dataset.clip,
+      mode: (c.querySelector("input[type=radio]:checked") || {}).value || "custom",
+      chime: c.querySelector(".dchime").value,
+      zones: Array.from(c.querySelectorAll(".dzone:checked")).map(i => i.value)}));
+    // Only what differs from the default needs keeping, but keeping "custom" rows is harmless and readable.
+    const bad = list.find(x => x.mode === "nax" && !x.chime);
+    if (bad) { say(bad.clip + ": choose a chime", true); return; }
+    say("saving...");
+    try {
+      const r = await (await fetch(base + "/config", {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, HH), body: JSON.stringify({doorbell_modes: list})})).json();
+      say(r.ok ? "Saved. The next ring uses it." : "Not saved: " + (r.error || "unknown"), !r.ok);
+      if (r.ok) modes = Object.fromEntries(list.map(d => [d.clip, d]));
+    } catch (e) { say("Not saved: " + e, true); }
+  };
+  load();
 })();
 
 // -- amplifiers: what is configured, what the last scan found, and a scan on demand --
