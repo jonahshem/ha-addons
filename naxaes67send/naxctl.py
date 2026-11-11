@@ -48,6 +48,20 @@ def _zone_order(name):
     return (0, int(tail)) if tail.isdigit() else (1, str(name))
 
 
+def _zone_number(name):
+    """`Zone5` -> 5; 0 for anything that is not ZoneN (never limited)."""
+    tail = str(name).replace("Zone", "").strip()
+    return int(tail) if tail.isdigit() else 0
+
+
+# (model prefix, zones the add-on may use). 🔴 A DM-NAX-4ZSA-50 lists five
+# zones, but at 110 Roosevelt its fifth (Cabana Bar, Cabana - Terrace, Pool) is
+# set as an OUTPUT feeding PowerStream amplifiers, and its receive slot will not
+# take our address (keeps the name, reads 0.0.0.0). Jonah, 2026-11-11: leave
+# those off the announce system until it is understood - first four only.
+ZONE_LIMITS = (("DM-NAX-4Z", 4),)
+
+
 def mark_buses(zones):
     """Fold bussed zones into one: the lowest-numbered member of a bus is the
     primary and carries `members`; the others get `bus_of` naming it. A bus
@@ -183,8 +197,35 @@ class Nax:
                 return v.strip()
         return ""
 
+    def _read_model(self):
+        try:
+            self._model = (self.get("DeviceInfo").get("DeviceInfo") or {}).get("Model") or ""
+        except Exception:
+            # Remembered too: asking again on every zone of every page would put
+            # a REST round trip on the page's critical path for nothing. A new
+            # session (the pool rebuilds them) asks again.
+            self._model = ""
+
+    def model(self):
+        """The amplifier's model (`DeviceInfo/Model`), read once per session,
+        normally alongside the first `zones()`. "" when it could not be read."""
+        if getattr(self, "_model", None) is None:
+            self._read_model()
+        return self._model
+
+    def zone_limit(self):
+        """How many zones of this model the add-on may use, or None for all."""
+        m = (self.model() or "").upper()
+        for prefix, n in ZONE_LIMITS:
+            if m.startswith(prefix):
+                return n
+        return None
+
     def zones(self, strict=False):
         """Every zone: what it is called, its source, whether audio is there.
+
+        Zones past `zone_limit()` are left out entirely (0.15.5): never
+        listed, warmed or paged. See ZONE_LIMITS.
 
         `strict` raises when either read failed. Without it a failed read is
         an empty one - fine for the tile's list, and wrong for anything that
@@ -207,6 +248,10 @@ class Nax:
 
         threads = [threading.Thread(target=fetch, args=a) for a in
                    (("Routes", "AvMatrixRouting"), ("Zones", "ZoneOutputs"))]
+        if getattr(self, "_model", None) is None:
+            # The model decides which zones are ours (ZONE_LIMITS); read it in
+            # the same round trip, once per session.
+            threads.append(threading.Thread(target=self._read_model))
         for t in threads:
             t.start()
         for t in threads:
@@ -215,7 +260,10 @@ class Nax:
             raise NaxError("could not read the zones ("
                            + "; ".join(f"{k}: {v}" for k, v in failed.items()) + ")")
         out, routes, zs = {}, got["Routes"], got["Zones"]
+        limit = self.zone_limit()
         for name in sorted(set(routes) | set(zs), key=_zone_order):
+            if limit and _zone_number(name) > limit:
+                continue
             out[name] = {
                 "name": self._label(zs.get(name)) or self._label(routes.get(name)),
                 "source": (routes.get(name) or {}).get("AudioSource", ""),
@@ -275,6 +323,18 @@ class Nax:
             raise NaxError(f"{zone} is not a zone name") from e
         return f"Stream{n:02d}"
 
+    def announced(self, session_name):
+        """What this amplifier holds for our session in its discovered-stream
+        list (`NaxSdp`): [{"clock", "source", "id"}], one per copy it keeps."""
+        sdp = (self.get("NaxAudio").get("NaxAudio") or {}).get("NaxSdp", {}).get("NaxSdpStreams") or {}
+        out = []
+        for key, v in sdp.items():
+            if isinstance(v, dict) and (v.get("SessionNameStatus") or "").strip() == session_name:
+                out.append({"clock": sdp_clock(v.get("TsRefClkValue")),
+                            "source": v.get("SourceNetworkAddress"),
+                            "id": v.get("SessionId") or key})
+        return out
+
     def rx_known(self, zone, session_name):
         """Already confirmed on this session, so `ensure_rx` will cost nothing."""
         try:
@@ -324,12 +384,29 @@ class Nax:
             self.log(f"[nax] {self.host} {zone}: receive slot names our session "
                      f"but asks for {cur.get('NetworkAddressRequested')}:"
                      f"{cur.get('PortRequested')} - correcting to {address}:{port}")
-        if mine:
+        elif mine:
+            # 🔴 Only a slot naming somebody ELSE's session is refused. Until
+            # 0.15.5 this was a plain `if mine:`, so the correction logged just
+            # above never ran: our own name made the slot look taken, it was
+            # counted "carrying another session", and it stayed wrong at every
+            # start-up. 110 Roosevelt's Gym sat on 0.0.0.0 that way.
             raise SlotTaken(
                 f"{zone}'s receive slot is already carrying {mine!r} - "
                 f"leaving it alone rather than taking it over")
         self.subscribe(slot, session_name, address, port)
         time.sleep(SETTLE)
+        # Read it back. An amplifier can keep the name and drop the address:
+        # a DM-NAX-4ZSA-50 (fw 3.1.0139) does exactly that on its fifth slot
+        # (110 Roosevelt, 2026-11-11) - the write is accepted, the slot reads
+        # 0.0.0.0 and Stopped, and the zone is silent for every page. Without
+        # this check it was reported as fine forever.
+        got = self.rx_streams(strict=True).get(slot) or {}
+        if ((got.get("NetworkAddressRequested") or "") != address
+                or str(got.get("PortRequested") or "") != str(port)):
+            raise NaxError(
+                f"{zone}: the amplifier did not take the receive slot - {slot} still asks for "
+                f"{got.get('NetworkAddressRequested')}:{got.get('PortRequested')} after writing "
+                f"{address}:{port}")
         self._rx_ok.add((slot, session_name))
         return True
 
@@ -1042,6 +1119,16 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
             for zone in zones:
                 if closing.is_set():
                     return
+                # A zone the listing left out (past this model's ZONE_LIMITS)
+                # is not ours to page: refused before its slot or route is
+                # touched.
+                limit = nax.zone_limit()
+                if limit and _zone_number(zone) > limit:
+                    log(f"[nax] {host} {zone}: left off the announce system on a "
+                        f"{nax.model()} (first {limit} zones only)")
+                    with state:
+                        refused.append(f"{host}:{zone}")
+                    continue
                 if not session_name:
                     taking.append(zone)
                     continue
@@ -1508,6 +1595,35 @@ def announce_many(amps, targets, play, *, source=SOURCE, restore=None,
             "contested": contested,
             "resumed": {f"{h}:{z}": sid for (h, z), sid in resume.items()},
             "refused": refused}
+
+
+def sdp_clock(ts_refclk):
+    """`ptp=IEEE1588-2008:C4-42-68-FF-FE-85-98-ED:0` -> `C4-42-68-FF-FE-85-98-ED`
+    (upper case); None when it names no PTP clock."""
+    parts = (ts_refclk or "").split(":")
+    return parts[1].strip().upper() if len(parts) >= 2 and parts[0].lower().startswith("ptp") else None
+
+
+def stale_announcements(held, clock):
+    """Judge one amplifier's copies of our session against what we announce.
+
+    `held` is `Nax.announced()`. Returns None when it holds exactly one copy
+    and that copy names `clock`; otherwise a sentence saying what is wrong.
+
+    🔴 Why this exists: at 110 Roosevelt (2026-11-11) the DM-NAX-4ZSA-50s kept
+    an old copy naming a clock the house no longer used, and every zone on them
+    played silence while the add-on, the routes and the 8-zone amplifiers all
+    looked fine. Nothing anywhere said so. This is the check that would have.
+    """
+    if not held:
+        return "does not list our session at all (SAP not reaching it?)"
+    clocks = sorted({h["clock"] or "?" for h in held})
+    want = (clock or "").upper()
+    if len(held) > 1:
+        return f"holds {len(held)} copies of our session (clocks {', '.join(clocks)}; announcing {want})"
+    if held[0]["clock"] != want:
+        return f"holds a stale copy naming clock {held[0]['clock']} (announcing {want})"
+    return None
 
 
 def prewarm(amps, pool, session_name, address, port=5004, *, busy=None,

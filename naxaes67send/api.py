@@ -52,6 +52,7 @@ import clips
 import crpcmedia
 import discover
 import naxctl
+import sap
 import sender
 import zonelist
 
@@ -360,6 +361,63 @@ def startup():
     except Exception as e:
         log(f"[nax] journal restore at start-up failed: {type(e).__name__}: {e}")
     prewarm("start-up")
+    threading.Thread(target=_watch_announcements, daemon=True, name="sdp-check").start()
+
+
+# What each amplifier holds for our session, checked every ANNOUNCE_CHECK
+# seconds (0.15.5). {host: {"ok": bool, "problem": str|None, "held": [...], "at": t}}.
+ANNOUNCE_CHECK = 300
+_announced = {}
+_announced_lock = threading.Lock()
+
+
+def check_announcements():
+    """One pass: read every amplifier's copy of our session and compare it
+    with what we announce. Read-only - it never deletes or re-points anything,
+    because a stream knocked out of an amplifier's list is exactly the state in
+    which nothing will bind (README, "the sender must never stop"). A problem is
+    logged as a WARNING and shown in /health for the fleet monitor to raise."""
+    mine = next((r for r in sap.running() if r["session"] == SESSION), None)
+    if mine is None or not mine.get("gm"):
+        return {}
+    out = {}
+    for host, cfg in amplifiers().items():
+        if not cfg.get("password"):
+            continue
+        try:
+            held = _pool.get(host, cfg).announced(SESSION)
+            problem = naxctl.stale_announcements(held, mine["gm"])
+        except Exception as e:
+            held, problem = None, f"could not be read ({type(e).__name__}: {e})"
+        with _announced_lock:
+            was = (_announced.get(host) or {}).get("problem")
+            _announced[host] = {"ok": problem is None, "problem": problem, "held": held, "at": time.time()}
+        if problem and problem != was:
+            log(f"[sap] WARNING {host} {problem} - its zones will play silence until it relearns "
+                f"the announcement (rebooting that amplifier clears it)")
+        elif was and not problem:
+            log(f"[sap] {host} now holds the current announcement")
+        out[host] = problem
+    return out
+
+
+def _announcement_summary():
+    with _announced_lock:
+        got = dict(_announced)
+    return {"checked": len(got),
+            "stale": {h: v["problem"] for h, v in got.items() if not v["ok"]},
+            "at": max((v["at"] for v in got.values()), default=None)}
+
+
+def _watch_announcements():
+    time.sleep(120)     # let SAP reach everyone after a start before judging
+    while True:
+        try:
+            if not _speaking.locked():
+                check_announcements()
+        except Exception as e:
+            log(f"[sap] announcement check failed: {type(e).__name__}: {e}")
+        time.sleep(ANNOUNCE_CHECK)
 
 
 def amplifiers():
@@ -544,6 +602,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The single most useful thing to know when a page is silent:
                 # the sender must be running for the route to bind at all.
                 "discovery": discover.public(),
+                # 0.15.5: what we announce, and whether every amplifier holds
+                # it. An amplifier listed under `stale` plays silence.
+                "announcement": next((r for r in sap.running() if r["session"] == SESSION), None),
+                "amp_announcements": _announcement_summary(),
                 "note": "the stream carries silence until an announcement is sent",
             })
 

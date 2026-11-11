@@ -236,10 +236,18 @@ def build():
     try:
         gm_id = int(clock.get_property("grandmaster-clock-id") or 0)
         if gm_id:
-            gm = "-".join(f"{(gm_id >> (8 * (7 - i))) & 0xFF:02X}" for i in range(8))
+            gm = sap.eui64(gm_id)
     except Exception as e:
         print(f"[sender] grandmaster id not readable ({e!r}); advertising the default", flush=True)
     print(f"[sender] PTP grandmaster: {gm}" + (" (default - NOT read from the network)" if gm == sap.GM and not gm_id else ""), flush=True)
+
+    # 🔴 And read again before every announcement (0.15.5), not only here: a
+    # house that restarts all at once can elect a different grandmaster after
+    # we have read it, and a stale ts-refclk made 110 Roosevelt's doorbell
+    # play only some of the time for five days. See sap.Announcement.
+    def current_gm():
+        gid = int(clock.get_property("grandmaster-clock-id") or 0)
+        return sap.eui64(gid) if gid else None
 
     # The stream is 1000 packets a second and the feeder is a Python thread:
     # anything that holds the CPU for longer than the appsrc queue is a gap
@@ -251,7 +259,7 @@ def build():
         print(f"[sender] could not raise priority ({e!r})", flush=True)
 
     sap.start(src_ip=src, mcast=MCAST, port=PORT, session_name=SESSION,
-              iface_ip=src, gm=gm, log=lambda m: print(m, flush=True))
+              iface_ip=src, gm=current_gm if gm_id else gm, log=lambda m: print(m, flush=True))
 
     # `block=true` with a small `max-bytes` is what paces the feeder: it
     # blocks in push-buffer once about 250 ms is queued (30 ms until 0.14.2 -
@@ -293,4 +301,26 @@ def run_forever(pipe):
             loop.quit()
 
     bus.connect("message", on_msg)
+
+    # 🔴 0.15.5: withdraw the SAP announcement when the Supervisor stops us
+    # (stop, restart, update - all SIGTERM). An amplifier that is told the
+    # session is gone drops it; one that is not keeps the old description, and
+    # at 110 Roosevelt three DM-NAX-4ZSA-50s kept a stale one for hours. The
+    # loop is GLib's, so the signal has to be caught there, not with `signal`.
+    import signal
+
+    def on_term(*_):
+        print("[sender] stopping: withdrawing the announcement", flush=True)
+        try:
+            sap.stop_all(log=lambda m: print(m, flush=True))
+        finally:
+            loop.quit()
+        return False
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, on_term)
+        except Exception as e:
+            print(f"[sender] cannot catch signal {sig} ({e!r}); a stop will not withdraw the announcement",
+                  flush=True)
     loop.run()
