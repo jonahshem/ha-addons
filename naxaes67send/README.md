@@ -229,6 +229,108 @@ only if the zone is still on `Aes67` (and never *to* `Aes67`), a volume only
 if the zone is still at the level the page wrote. A room somebody has touched
 since is theirs.
 
+## 0.15.7 — per doorbell: its own announcement, or the amplifier's chime over the music
+
+A DM-NAX plays its own built-in door chime **over** whatever a zone is
+playing: the music ducks (`ZoneOutputs/Zones/ZoneN/Announcing.DuckingLevel`,
+-20 dB here) and comes back by itself, and no route or volume changes. Proven
+by ear at 110 Roosevelt on 2026-11-11 (`DoorChimes/DefaultChimes/DefaultSlot01
+{"Play": true}` on .54, Kitchen, music on Input07). Our own clips can only be
+played by switching the zone, so each doorbell can now choose:
+
+- **Custom** (default): the clip, exactly as before.
+- **NAX chime**: one of the 26 factory chimes (Dual Tone, Westminster,
+  ringtones, alerts - firmware 3.1.0103/0139 has no custom slots), in the zones
+  ticked for it, or the zones the doorbell's programming names when none are.
+
+Set on the add-on's page under **Doorbells** (with a Test button), stored as
+the `doorbell_modes` option. `/announce?clip=<doorbell>` honours it, so Crestron
+programming does not change. `POST /chime {"chime": "DefaultSlot01", "zones":
+["host:ZoneN"]}` rings one now. The chime's level is each zone's
+`Announcing.Volume` on the amplifier, not this add-on's announce volume.
+Ringing writes the slot's `PlaybackZones` on an amplifier only when it differs
+from what is wanted, then `Play`; a DM-NAX-4Z's fifth zone is never rung.
+
+Also fixed: two saves from the page without a restart between them lost the
+first - `_save_config` built on `/data/options.json`, which the Supervisor
+rewrites only at start. Reading and saving now use the newer of that and
+`/data/settings.json`.
+
+## 0.15.6 — a zone playing Crestron's room-to-room music is left alone
+
+110 Roosevelt, 2026-11-11, the first doorbell after 0.15.5 went live with music
+on: Crestron Home was playing the Kitchen amplifier's player in Common Areas,
+which it does through **the same receive slot and `Aes67` input** this add-on
+uses (`.51 Stream06`: `SessionNameRequested` empty, `SessionNameStatus`
+`MediaStream37c4.42.68.88.bb.fa`). The page trusted its memory that the slot
+was ours, read `Aes67` as its own leftover, raised the zone to 700 - the music
+got loud, the chime never reached that room - and afterwards set it to nothing.
+
+- A slot's owner is read from `SessionNameRequested` **and**
+  `SessionNameStatus`; another name in either, while the slot is running, means
+  the zone is refused untouched (no route, no volume). A Stopped slot's leftover
+  name does not lock the zone out.
+- A page reads each amplifier's slots fresh (one REST read) instead of trusting
+  what the last warm-up confirmed.
+
+Ducking the music under the chime instead of switching the zone - which the
+DM-NAX supports natively (`ZoneOutputs/.../Announcing`, `DuckerConfig`,
+`DoorChimes`) - is the next step, not this release.
+
+## 0.15.5 — the SDP follows the grandmaster; mis-addressed slots are corrected
+
+Both found at 110 Roosevelt on 2026-11-11, after "doorbells are not working".
+
+**The grandmaster is read before every announcement, not once.** On
+2026-11-06 everything in the house restarted together. While the amplifiers
+came up, NAX-5 (.55) was the grandmaster when the add-on read it, and for five
+days the SDP named that clock (`ts-refclk ...81-D0-68`) while all six
+amplifiers had settled on NAX-1 (`...85-98-ED`). The stream played some of the
+time: of two identical test pages a minute apart, the amplifier detected
+signal on one. A restart of the add-on fixed it. Now `sap.Announcement`
+re-reads `grandmaster-clock-id` every 10 s; on a change it logs
+`[sap] PTP grandmaster changed A -> B`, keeps the session id, and announces a
+new `o=` version with a new SAP hash. A failed or empty read (PTP
+re-electing) keeps what was being announced.
+
+**A slot that names our session at the wrong address is corrected.** The
+correction in `ensure_rx` logged "correcting to 239.69.4.4:5004" and then hit
+`if mine: raise SlotTaken`, so our own name made the slot look taken and it was
+counted "carrying another session" at every start-up. 110's Gym sat on
+`0.0.0.0` that way; one write fixed it.
+
+**Every slot write is read back.** A DM-NAX-4ZSA-50 (fw 3.1.0139) keeps the
+session name on its fifth slot and drops the address: the write is accepted
+and the slot reads `0.0.0.0`, Stopped. That zone (Cabana Bar, Cabana -
+Terrace, Pool at 110) is now reported in the warm-up line as `failed: ... the
+amplifier did not take the receive slot`, instead of looking fine.
+
+**A restart is the same session, a stop withdraws it, and every amplifier's
+copy is checked.** After the add-on was restarted at 110 to fix the clock, the
+DM-NAX-8ZSAs took the new announcement but the three DM-NAX-4ZSA-50s (fw
+3.1.0139) kept the old one, with the old clock, and every zone on them played
+silence - routes landed, volumes rose, nothing anywhere said why. Three fixes:
+
+- The session id and version are kept in `/data/sap-session.json`, so a
+  restart announces the same session at a higher version (SAP's "replace what
+  you have") instead of a new session under the same name. A renamed session
+  or another group is still a new session.
+- SIGTERM (stop, restart, update) sends a SAP deletion before exiting.
+- Every 5 minutes each amplifier's copy of our session (`NaxSdp`) is compared
+  with what we announce. A missing, duplicated or stale copy is logged as
+  `[sap] WARNING <amp> ...` and listed under `amp_announcements.stale` in
+  `/health`. Read-only: it never deletes or re-points anything, because a
+  stream knocked out of an amplifier's list is when nothing binds. A reboot of
+  the amplifier clears a stale copy.
+
+**A DM-NAX-4Z uses its first four zones only.** At 110 that fifth zone is set
+as an output feeding PowerStream amplifiers. Until that is understood it is off
+the announce system altogether (Jonah, 2026-11-11): `ZONE_LIMITS` in
+`naxctl.py`. The model is read once per session from `DeviceInfo`, in the
+same round trip as the zone reads; zones past the limit are not listed, not
+warmed, and a page that names one is refused before its slot or route is
+touched. An amplifier whose model cannot be read is not limited.
+
 ## 0.15.4 — starts even with Protection mode off
 
 A house whose add-on had Protection mode switched off crash-looped at start,

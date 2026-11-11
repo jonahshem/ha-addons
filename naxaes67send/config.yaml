@@ -1,5 +1,5 @@
 name: NAX AES67 Sender
-version: "0.15.4"
+version: "0.15.7"
 slug: naxaes67send
 description: AES67 announcements into a DM NAX - a always-on stream, spoken into on demand
 arch: [aarch64, amd64]
@@ -92,6 +92,11 @@ options:
   default_percent: 70
   zone_volumes: []
   speaker_groups: []
+  # Per doorbell (by clip id): "custom" plays the clip as always; "nax" rings
+  # one of the amplifiers' own built-in chimes instead, OVER the music (the
+  # amplifier ducks it), in the zones listed - or, with none, the zones the
+  # doorbell asked for. Edited on the add-on's page under Doorbells.
+  doorbell_modes: []
   api_port: 8099
 schema:
   iface: str?
@@ -133,4 +138,10 @@ schema:
       zones:
         - str
       page_group: str?
+  doorbell_modes:
+    - clip: str
+      mode: list(custom|nax)
+      chime: str?
+      zones:
+        - str?
   api_port: int
